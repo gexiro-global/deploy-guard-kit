@@ -1,0 +1,9 @@
+# Expected PM2 layout. The validator asserts each app is online AND running from
+# exactly this directory - a matching name with a different cwd is a failure.
+
+example-web:
+  cwd: /srv/example-web/current/.next/standalone
+  port: 3000
+example-api:
+  cwd: /srv/example-api/current
+  port: 3001

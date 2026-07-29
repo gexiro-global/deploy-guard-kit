@@ -1,0 +1,2 @@
+[{"name":"example-web","pm2_env":{"pm_cwd":"/srv/example-web/current/.next/standalone","status":"online"}},
+ {"name":"example-api","pm2_env":{"pm_cwd":"/srv/example-api/current","status":"online"}}]

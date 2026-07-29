@@ -1,0 +1,5 @@
+*.log
+*.local
+port-registry.yaml
+pm2-inventory.yaml
+checks.conf

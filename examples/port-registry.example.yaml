@@ -1,0 +1,20 @@
+# Declarative source of truth for port ownership.
+# Edit by hand and commit it. Do NOT auto-generate this from runtime state - the whole
+# point is that it records what SHOULD be true, so it can disagree with reality.
+#
+# "UNKNOWN" means "not yet claimed" and never blocks a deploy.
+
+"3000":
+  app: example-web
+  cwd: /srv/example-web/current
+  consumers:
+    - www.example.com
+"3001":
+  app: example-api
+  cwd: /srv/example-api/current
+  consumers:
+    - api.example.com
+"3002":
+  app: UNKNOWN
+  cwd:
+  consumers:
