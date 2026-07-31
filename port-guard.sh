@@ -30,8 +30,15 @@ LOCK="${GUARD_LOCK:-/tmp/deploy-guard.lock}"
 ECOSYSTEM="${GUARD_ECOSYSTEM:-}"
 HERE=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 
+# The adapter name is used to build a path that gets sourced as shell code, so it is matched
+# against a fixed list rather than sanitised - otherwise GUARD_ADAPTER=../../anything becomes
+# arbitrary code execution.
+case "$ADAPTER" in
+  openlitespeed|nginx|none) ;;
+  *) echo "GUARD-FAIL: unknown adapter '$ADAPTER' (expected: openlitespeed, nginx, none)"; exit 2 ;;
+esac
 # shellcheck source=/dev/null
-. "$HERE/adapters/${ADAPTER}.sh" || { echo "GUARD-FAIL: unknown adapter '$ADAPTER'"; exit 2; }
+. "$HERE/adapters/${ADAPTER}.sh" || { echo "GUARD-FAIL: cannot load adapter '$ADAPTER'"; exit 2; }
 
 exec 9>"$LOCK" || { echo "GUARD-FAIL: cannot open lock $LOCK"; exit 3; }
 flock -n 9 || { echo "GUARD-FAIL: another deploy holds the lock ($LOCK)"; exit 3; }

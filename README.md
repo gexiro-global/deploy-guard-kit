@@ -1,6 +1,6 @@
 # deploy-guard-kit
 
-[![CI](https://github.com/gexiro-global/deploy-guard-kit/actions/workflows/ci.yml/badge.svg)](https://github.com/gexiro-global/deploy-guard-kit/actions/workflows/ci.yml)
+[![CI](https://github.com/dzeusking-dev/deploy-guard-kit/actions/workflows/ci.yml/badge.svg)](https://github.com/dzeusking-dev/deploy-guard-kit/actions/workflows/ci.yml)
 [![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
 
 Three pre-flight checks for single-host deploys, aimed at the failures that green status
@@ -30,7 +30,7 @@ race each other into the same conclusion.
 ## Install
 
 ```bash
-git clone https://github.com/gexiro-global/deploy-guard-kit.git
+git clone https://github.com/dzeusking-dev/deploy-guard-kit.git
 cd deploy-guard-kit
 cp examples/port-registry.example.yaml port-registry.yaml
 cp examples/pm2-inventory.example.yaml pm2-inventory.yaml

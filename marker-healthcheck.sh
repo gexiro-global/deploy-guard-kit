@@ -26,6 +26,14 @@ while IFS='|' read -r port host want; do
   port=$(echo "$port" | tr -d ' '); host=$(echo "$host" | tr -d ' ')
   want=$(echo "$want" | sed 's/^ *//; s/ *$//')
 
+  # An empty marker becomes an empty regex, which grep matches in every response - a malformed
+  # config line would silently report every backend as healthy.
+  if [ -z "$want" ]; then
+    echo "  ALERT :$port ($host) no expected marker configured - refusing to pass this check"
+    FAIL=1
+    continue
+  fi
+
   body=$(curl -s -L --max-time "$TIMEOUT" -H "Host: $host" "http://${TARGET}:${port}/" 2>/dev/null || true)
   title=$(printf '%s' "$body" | grep -oiE '<title>[^<]{0,60}' | head -1 | sed 's/<title>//I')
 

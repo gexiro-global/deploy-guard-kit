@@ -64,6 +64,27 @@ else
 fi
 rm -rf "$STUB"
 
+echo '== regressions =='
+# The adapter name is sourced as shell code, so a traversal value must be refused outright.
+GUARD_ADAPTER='../../etc/passwd' GUARD_REGISTRY="$REG" \
+  "$ROOT/port-guard.sh" example-web 3000 'example-web' >/dev/null 2>&1
+[ $? -eq 2 ] && ok 'refuses an adapter name outside the allowlist' \
+             || no 'refuses an adapter name outside the allowlist'
+
+# An empty marker would make grep match every response and pass any backend.
+STUB2=$(mktemp -d)
+printf '%s\n' '#!/bin/bash' 'echo "<html><title>anything</title></html>"' > "$STUB2/curl"
+chmod +x "$STUB2/curl"
+printf '3000 | www.example.com |\n' > "$STUB2/empty.conf"
+OUT=$(PATH="$STUB2:$PATH" "$ROOT/marker-healthcheck.sh" "$STUB2/empty.conf" 2>&1)
+RC=$?
+if [ $RC -ne 0 ] && printf '%s' "$OUT" | grep -q 'no expected marker'; then
+  ok 'refuses a check line with an empty marker'
+else
+  no 'refuses a check line with an empty marker'
+fi
+rm -rf "$STUB2"
+
 echo
 echo "passed=$PASS failed=$FAIL"
 [ "$FAIL" -eq 0 ]
