@@ -107,7 +107,29 @@ GUARD_LOCK="$REGVAR/l3" GUARD_ADAPTER=nginx NGINX_CONF_DIR="$REGVAR/does-not-exi
              || no 'fails when the adapter cannot read its config directory'
 rm -rf "$REGVAR"
 
+# The registry parser must key off TOP-LEVEL entries only. A nested key with the same name is
+# unrelated metadata; treating it as the registry entry lets the wrong thing decide ownership.
+PARSE=$(mktemp -d)
+printf 'services:\n  3000:\n    app: not-the-registry\n' > "$PARSE/nested.yaml"
+GUARD_LOCK="$PARSE/n1" GUARD_REGISTRY="$PARSE/nested.yaml" \
+  "$ROOT/port-guard.sh" anyapp 3000 'anyapp' >/dev/null 2>&1
+[ $? -eq 0 ] && ok 'ignores a nested key that merely looks like a registry entry' \
+             || no 'ignores a nested key that merely looks like a registry entry'
+
+# An inline YAML comment is not part of the value.
+printf '\"3000\":\n  app: example-web # the owner\n' > "$PARSE/comment.yaml"
+GUARD_LOCK="$PARSE/n2" GUARD_REGISTRY="$PARSE/comment.yaml" \
+  "$ROOT/port-guard.sh" example-web 3000 'example-web' >/dev/null 2>&1
+[ $? -eq 0 ] && ok 'strips an inline comment from the owner value' \
+             || no 'strips an inline comment from the owner value'
+GUARD_LOCK="$PARSE/n3" GUARD_REGISTRY="$PARSE/comment.yaml" \
+  "$ROOT/port-guard.sh" other-app 3000 'other-app' >/dev/null 2>&1
+[ $? -eq 2 ] && ok 'still rejects a foreign app when the value had a comment' \
+             || no 'still rejects a foreign app when the value had a comment'
+rm -rf "$PARSE"
+
 echo
 echo "passed=$PASS failed=$FAIL"
 [ "$FAIL" -eq 0 ]
+
 

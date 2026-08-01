@@ -114,8 +114,9 @@ as "no conflict found in the places I know how to look", not as proof of exclusi
 ./tests/run_tests.sh
 ```
 
-Eight assertions, fully offline: no network, no PM2, no firewall, no privileged access. The PM2
-check runs against JSON fixtures; the healthcheck runs against a stubbed `curl`.
+Fully offline: no network, no PM2, no firewall, no privileged access. The PM2 check runs against
+JSON fixtures; the healthcheck runs against a stubbed `curl`; the registry parser is exercised with
+the YAML variations people actually write.
 
 ## License
 

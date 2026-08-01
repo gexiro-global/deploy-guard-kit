@@ -70,23 +70,30 @@ fi
 
 # 3) REGISTRY - declared owner must be this app, UNKNOWN, or absent
 if [ -f "$REGISTRY" ]; then
-  # Tolerate ordinary YAML variation: an unquoted key, extra spaces, or a different indent.
-  # Requiring a byte-exact "3000": followed by exactly two spaces silently disabled the check.
+  # Tolerate ordinary YAML variation - an unquoted key, a quoted value, a different indent,
+  # an inline comment - while still requiring the port to be a TOP-LEVEL key. Matching a
+  # nested key of the same name would let unrelated metadata decide who owns a port.
   owner=$(awk -v port="$PORT" '
     {
       line = $0
+      sub(/[ \t]+$/, "", line)
+      if (line ~ /^[ \t]/) {
+        if (f && line ~ /^[ \t]+app:[ \t]*/) {
+          sub(/^[ \t]+app:[ \t]*/, "", line)
+          sub(/[ \t]+#.*$/, "", line)
+          gsub(/["'"'"']/, "", line)
+          sub(/[ \t]+$/, "", line)
+          print line
+          exit
+        }
+        next
+      }
+      # a new top-level key ends the previous block
+      if (f) exit
       key = line
       sub(/:.*$/, "", key)
       gsub(/["'"'"' \t]/, "", key)
-      if (key == port && line ~ /:[ \t]*$/) { f = 1; next }
-      if (f && line ~ /^[^ \t]/) { exit }
-      if (f && line ~ /^[ \t]+app:/) {
-        sub(/^[ \t]+app:[ \t]*/, "", line)
-        gsub(/["'"'"']/, "", line)
-        sub(/[ \t]+$/, "", line)
-        print line
-        exit
-      }
+      if (key == port && line ~ /:[ \t]*(#.*)?$/) f = 1
     }' "$REGISTRY" 2>/dev/null)
   if [ -n "${owner:-}" ] && [ "$owner" != "$APP" ] && [ "$owner" != "UNKNOWN" ]; then
     fail "registry says port $PORT belongs to '$owner', not '$APP'"
