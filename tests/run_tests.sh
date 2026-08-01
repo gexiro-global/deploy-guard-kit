@@ -85,6 +85,29 @@ else
 fi
 rm -rf "$STUB2"
 
+# The registry is hand-written YAML, so ordinary formatting variation must not silently
+# disable ownership enforcement. Requiring a byte-exact quoted key and exactly two spaces
+# meant a reformatted registry stopped protecting anything.
+REGVAR=$(mktemp -d)
+printf '3000:\n    app: "example-web"\n    cwd: /srv/x\n' > "$REGVAR/unquoted.yaml"
+GUARD_LOCK="$REGVAR/l1" GUARD_REGISTRY="$REGVAR/unquoted.yaml" \
+  "$ROOT/port-guard.sh" other-app 3000 'other-app' >/dev/null 2>&1
+[ $? -eq 2 ] && ok 'reads an unquoted key with a four-space indent' \
+             || no 'reads an unquoted key with a four-space indent'
+
+GUARD_LOCK="$REGVAR/l2" GUARD_REGISTRY="$REGVAR/unquoted.yaml" \
+  "$ROOT/port-guard.sh" example-web 3000 'example-web' >/dev/null 2>&1
+[ $? -eq 0 ] && ok 'still lets the declared owner through' \
+             || no 'still lets the declared owner through'
+
+# An adapter that cannot read its config tree must fail, not report "no consumers found".
+GUARD_LOCK="$REGVAR/l3" GUARD_ADAPTER=nginx NGINX_CONF_DIR="$REGVAR/does-not-exist" \
+  GUARD_REGISTRY="$REG" "$ROOT/port-guard.sh" example-web 3000 'example-web' >/dev/null 2>&1
+[ $? -eq 2 ] && ok 'fails when the adapter cannot read its config directory' \
+             || no 'fails when the adapter cannot read its config directory'
+rm -rf "$REGVAR"
+
 echo
 echo "passed=$PASS failed=$FAIL"
 [ "$FAIL" -eq 0 ]
+

@@ -46,6 +46,17 @@ flock -n 9 || { echo "GUARD-FAIL: another deploy holds the lock ($LOCK)"; exit 3
 fail(){ echo "GUARD-FAIL: $*"; exit 2; }
 
 # 1) STATIC - reverse proxy: does a foreign vhost already point at this port?
+# An adapter that cannot read its config tree must not look like "no consumers found" - that
+# would turn an unreadable proxy configuration into a GUARD-OK.
+if [ "$ADAPTER" != "none" ]; then
+  adapter_dir="${OLS_VHOST_DIR:-${NGINX_CONF_DIR:-}}"
+  case "$ADAPTER" in
+    openlitespeed) adapter_dir="${OLS_VHOST_DIR:-/usr/local/lsws/conf/vhosts}" ;;
+    nginx)         adapter_dir="${NGINX_CONF_DIR:-/etc/nginx}" ;;
+  esac
+  [ -d "$adapter_dir" ] || fail "adapter '$ADAPTER' cannot read its config directory: $adapter_dir"
+  [ -r "$adapter_dir" ] || fail "adapter '$ADAPTER' cannot read its config directory: $adapter_dir"
+fi
 if foreign=$(adapter_consumers "$PORT" 2>/dev/null | grep -viE "$ALLOW" || true); [ -n "${foreign:-}" ]; then
   fail "port $PORT is consumed by foreign proxy config(s): $(echo $foreign) (allowed: $ALLOW)"
 fi
@@ -59,7 +70,24 @@ fi
 
 # 3) REGISTRY - declared owner must be this app, UNKNOWN, or absent
 if [ -f "$REGISTRY" ]; then
-  owner=$(awk -v k="\"$PORT\":" '$0==k{f=1;next} f&&/^  app:/{print $2; exit}' "$REGISTRY" 2>/dev/null)
+  # Tolerate ordinary YAML variation: an unquoted key, extra spaces, or a different indent.
+  # Requiring a byte-exact "3000": followed by exactly two spaces silently disabled the check.
+  owner=$(awk -v port="$PORT" '
+    {
+      line = $0
+      key = line
+      sub(/:.*$/, "", key)
+      gsub(/["'"'"' \t]/, "", key)
+      if (key == port && line ~ /:[ \t]*$/) { f = 1; next }
+      if (f && line ~ /^[^ \t]/) { exit }
+      if (f && line ~ /^[ \t]+app:/) {
+        sub(/^[ \t]+app:[ \t]*/, "", line)
+        gsub(/["'"'"']/, "", line)
+        sub(/[ \t]+$/, "", line)
+        print line
+        exit
+      }
+    }' "$REGISTRY" 2>/dev/null)
   if [ -n "${owner:-}" ] && [ "$owner" != "$APP" ] && [ "$owner" != "UNKNOWN" ]; then
     fail "registry says port $PORT belongs to '$owner', not '$APP'"
   fi
