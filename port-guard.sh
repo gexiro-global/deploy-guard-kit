@@ -76,6 +76,7 @@ if [ -f "$REGISTRY" ]; then
   owner=$(awk -v port="$PORT" '
     {
       line = $0
+      sub(/\r$/, "", line)   # a registry saved with CRLF must still parse
       sub(/[ \t]+$/, "", line)
       if (line ~ /^[ \t]/) {
         if (f && line ~ /^[ \t]+app:[ \t]*/) {

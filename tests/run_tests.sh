@@ -128,8 +128,33 @@ GUARD_LOCK="$PARSE/n3" GUARD_REGISTRY="$PARSE/comment.yaml" \
              || no 'still rejects a foreign app when the value had a comment'
 rm -rf "$PARSE"
 
+# A registry saved on Windows must still parse. CRLF left a stray carriage return on the key,
+# so it never matched and ownership enforcement silently switched itself off.
+CRLF=$(mktemp -d)
+printf '"3000":\r\n  app: crlf-owner\r\n' > "$CRLF/reg.yaml"
+GUARD_LOCK="$CRLF/l1" GUARD_REGISTRY="$CRLF/reg.yaml" \
+  "$ROOT/port-guard.sh" other-app 3000 'other-app' >/dev/null 2>&1
+[ $? -eq 2 ] && ok 'parses a registry with CRLF line endings' \
+             || no 'parses a registry with CRLF line endings'
+
+# A shorter port must not match a longer one, in either direction.
+printf '"300":\n  app: small-app\n' > "$CRLF/prefix.yaml"
+GUARD_LOCK="$CRLF/l2" GUARD_REGISTRY="$CRLF/prefix.yaml" \
+  "$ROOT/port-guard.sh" myapp 3000 'myapp' >/dev/null 2>&1
+[ $? -eq 0 ] && ok 'does not treat port 300 as a match for 3000' \
+             || no 'does not treat port 300 as a match for 3000'
+
+# A top-level key with no block must not absorb the next entry's owner.
+printf '"3000":\n"3001":\n  app: next-one\n' > "$CRLF/empty.yaml"
+GUARD_LOCK="$CRLF/l3" GUARD_REGISTRY="$CRLF/empty.yaml" \
+  "$ROOT/port-guard.sh" anyapp 3000 'anyapp' >/dev/null 2>&1
+[ $? -eq 0 ] && ok 'an empty registry block does not borrow the next owner' \
+             || no 'an empty registry block does not borrow the next owner'
+rm -rf "$CRLF"
+
 echo
 echo "passed=$PASS failed=$FAIL"
 [ "$FAIL" -eq 0 ]
+
 
 
