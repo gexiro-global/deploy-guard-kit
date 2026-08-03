@@ -1,5 +1,11 @@
 #!/bin/bash
 # Offline test suite. No network, no pm2, no firewall, no privileged access.
+# shellcheck disable=SC2015,SC2016,SC2181
+# SC2015: the `[ cond ] && ok "..." || no "..."` shape is intentional here - `ok` cannot fail,
+#         so this is a two-branch report, not a mis-written if-then-else.
+# SC2016: single quotes are deliberate where a literal `$` belongs to awk, python or a stub.
+# SC2181: these suites check `$?` immediately after the command under test, which is the
+#         thing being asserted.
 set -uo pipefail
 HERE=$(cd "$(dirname "$0")" && pwd)
 ROOT=$(dirname "$HERE")
@@ -17,8 +23,9 @@ GUARD_REGISTRY="$REG" "$ROOT/port-guard.sh" example-web 3000 'example-web' >/dev
 GUARD_REGISTRY="$REG" "$ROOT/port-guard.sh" example-api 3000 'example-api' >/dev/null 2>&1
 [ $? -eq 2 ] && ok 'rejects an app claiming a port owned by another' || no 'rejects an app claiming a port owned by another'
 
-GUARD_REGISTRY="$REG" "$ROOT/port-guard.sh" anything 3002 'anything' >/dev/null 2>&1 \
-  && ok 'UNKNOWN owner never blocks a deploy' || no 'UNKNOWN owner never blocks a deploy'
+GUARD_REGISTRY="$REG" "$ROOT/port-guard.sh" anything 3002 'anything' >/dev/null 2>&1
+[ $? -eq 1 ] && ok 'UNKNOWN owner is inconclusive: not a collision, not a confirmation' \
+             || no 'UNKNOWN owner is inconclusive: not a collision, not a confirmation'
 
 RC_FILE=$(mktemp)
 ( flock -n 9 || exit 1
@@ -46,8 +53,8 @@ fi
 echo '== marker-healthcheck =='
 STUB=$(mktemp -d)
 printf '%s\n' '#!/bin/bash' \
-  'for a in "$@"; do case "$a" in *:3000/*) echo "<html><title>Example Widgets Ltd</title>ok</html>"; exit 0;; esac; done' \
-  'echo "<html><title>Welcome to nginx!</title></html>"' > "$STUB/curl"
+  'for a in "$@"; do case "$a" in *:3000/*) echo "<html><title>Example Widgets Ltd</title>ok</html>"; echo 200; exit 0;; esac; done' \
+  'echo "<html><title>Welcome to nginx!</title></html>"' 'echo 200' > "$STUB/curl"
 chmod +x "$STUB/curl"
 printf '3000 | www.example.com | Example Widgets Ltd\n' > "$STUB/checks.conf"
 printf '3009 | www.example.com | Example Widgets Ltd\n' > "$STUB/checks-bad.conf"
@@ -73,7 +80,7 @@ GUARD_ADAPTER='../../etc/passwd' GUARD_REGISTRY="$REG" \
 
 # An empty marker would make grep match every response and pass any backend.
 STUB2=$(mktemp -d)
-printf '%s\n' '#!/bin/bash' 'echo "<html><title>anything</title></html>"' > "$STUB2/curl"
+printf '%s\n' '#!/bin/bash' 'echo "<html><title>anything</title></html>"' 'echo 200' > "$STUB2/curl"
 chmod +x "$STUB2/curl"
 printf '3000 | www.example.com |\n' > "$STUB2/empty.conf"
 OUT=$(PATH="$STUB2:$PATH" "$ROOT/marker-healthcheck.sh" "$STUB2/empty.conf" 2>&1)
@@ -113,7 +120,7 @@ PARSE=$(mktemp -d)
 printf 'services:\n  3000:\n    app: not-the-registry\n' > "$PARSE/nested.yaml"
 GUARD_LOCK="$PARSE/n1" GUARD_REGISTRY="$PARSE/nested.yaml" \
   "$ROOT/port-guard.sh" anyapp 3000 'anyapp' >/dev/null 2>&1
-[ $? -eq 0 ] && ok 'ignores a nested key that merely looks like a registry entry' \
+[ $? -eq 1 ] && ok 'ignores a nested key that merely looks like a registry entry' \
              || no 'ignores a nested key that merely looks like a registry entry'
 
 # An inline YAML comment is not part of the value.
@@ -141,20 +148,65 @@ GUARD_LOCK="$CRLF/l1" GUARD_REGISTRY="$CRLF/reg.yaml" \
 printf '"300":\n  app: small-app\n' > "$CRLF/prefix.yaml"
 GUARD_LOCK="$CRLF/l2" GUARD_REGISTRY="$CRLF/prefix.yaml" \
   "$ROOT/port-guard.sh" myapp 3000 'myapp' >/dev/null 2>&1
-[ $? -eq 0 ] && ok 'does not treat port 300 as a match for 3000' \
+[ $? -eq 1 ] && ok 'does not treat port 300 as a match for 3000' \
              || no 'does not treat port 300 as a match for 3000'
 
 # A top-level key with no block must not absorb the next entry's owner.
 printf '"3000":\n"3001":\n  app: next-one\n' > "$CRLF/empty.yaml"
 GUARD_LOCK="$CRLF/l3" GUARD_REGISTRY="$CRLF/empty.yaml" \
   "$ROOT/port-guard.sh" anyapp 3000 'anyapp' >/dev/null 2>&1
-[ $? -eq 0 ] && ok 'an empty registry block does not borrow the next owner' \
+[ $? -eq 1 ] && ok 'an empty registry block does not borrow the next owner' \
              || no 'an empty registry block does not borrow the next owner'
 rm -rf "$CRLF"
+
+# "No conflict found" and "this port is yours" are different claims. With no registry, no
+# adapter and nothing listening, the guard knows nothing - and must say so rather than approve.
+EVID=$(mktemp -d)
+GUARD_LOCK="$EVID/l1" GUARD_REGISTRY="$EVID/absent.yaml" \
+  "$ROOT/port-guard.sh" myapp 9999 'myapp' >/dev/null 2>&1
+[ $? -eq 1 ] && ok 'reports INCONCLUSIVE when nothing confirms ownership' \
+             || no 'reports INCONCLUSIVE when nothing confirms ownership'
+
+OUT=$(GUARD_LOCK="$EVID/l2" GUARD_REGISTRY="$EVID/absent.yaml" \
+      "$ROOT/port-guard.sh" myapp 9999 'myapp' 2>&1)
+printf '%s' "$OUT" | grep -q 'GUARD-INCONCLUSIVE' \
+  && ok 'the inconclusive verdict is named, not disguised as success' \
+  || no 'the inconclusive verdict is named, not disguised as success'
+printf '%s' "$OUT" | grep -q 'is reserved for' \
+  && no 'never claims a reservation it did not establish' \
+  || ok 'never claims a reservation it did not establish'
+
+# A registry entry naming this app IS positive evidence.
+GUARD_LOCK="$EVID/l3" GUARD_REGISTRY="$ROOT/examples/port-registry.example.yaml" \
+  "$ROOT/port-guard.sh" example-web 3000 'example-web' >/dev/null 2>&1
+[ $? -eq 0 ] && ok 'a matching registry entry confirms ownership' \
+             || no 'a matching registry entry confirms ownership'
+rm -rf "$EVID"
+
+# A healthcheck that checks nothing must not report health.
+HC=$(mktemp -d)
+: > "$HC/empty.conf"
+"$ROOT/marker-healthcheck.sh" "$HC/empty.conf" >/dev/null 2>&1
+[ $? -eq 2 ] && ok 'an empty checks file fails instead of passing' \
+             || no 'an empty checks file fails instead of passing'
+
+# A marker found inside an error page is not health.
+printf '%s\n' '#!/bin/bash' 'echo "<html><title>Example Widgets Ltd</title></html>"' 'echo 500' > "$HC/curl"
+chmod +x "$HC/curl"
+printf '3000 | www.example.com | Example Widgets Ltd\n' > "$HC/c.conf"
+OUT=$(PATH="$HC:$PATH" "$ROOT/marker-healthcheck.sh" "$HC/c.conf" 2>&1)
+RC=$?
+if [ "$RC" -eq 2 ] && printf '%s' "$OUT" | grep -q 'HTTP 500'; then
+  ok 'a marker inside a 500 page does not count as healthy'
+else
+  no 'a marker inside a 500 page does not count as healthy'
+fi
+rm -rf "$HC"
 
 echo
 echo "passed=$PASS failed=$FAIL"
 [ "$FAIL" -eq 0 ]
+
 
 
 

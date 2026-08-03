@@ -89,9 +89,23 @@ Writing one for Caddy or Apache is about five lines — see [`adapters/`](adapte
 | `HC_TARGET` | marker-healthcheck | `127.0.0.1` |
 | `HC_TIMEOUT` | marker-healthcheck | `8` |
 
-### Exit codes
+### Outcomes
 
-`0` pass · `2` a check failed · `3` another deploy holds the lock.
+`port-guard` reports one of three things, because "I found no conflict" and "this port is yours"
+are different claims:
+
+| Verdict | Exit | Meaning |
+|---|---|---|
+| `GUARD-OK` | `0` | At least one source positively confirms the port belongs to this app - a registry entry, a proxy consumer, or a running process with a matching working directory. |
+| `GUARD-INCONCLUSIVE` | `1` | Nothing else claims the port, but nothing confirms it is yours either. Declare it somewhere, then re-run. |
+| `GUARD-FAIL` | `2` | Something else owns or consumes it. |
+| — | `3` | Another deploy holds the lock. |
+
+If you use this as a hard gate, treat anything other than `0` as a stop. An earlier version
+reported success whenever it simply failed to find a conflict, which is the failure mode this
+three-state split exists to remove.
+
+`pm2-inventory` and `marker-healthcheck` use `0` pass · `2` fail.
 
 ## What this kit does NOT do
 

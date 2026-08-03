@@ -17,7 +17,15 @@
 #   GUARD_LOCK       lock file                      (default: /tmp/deploy-guard.lock)
 #   GUARD_ECOSYSTEM  glob(s) of process-manager configs to scan for static PORT= entries
 #
-# Exit: 0 reserved for you | 2 collision | 3 another deploy holds the lock
+# Outcomes:
+#   GUARD-OK            at least one source positively confirms this port belongs to <app-name>
+#   GUARD-INCONCLUSIVE  no conflict was found, but nothing confirmed ownership either
+#   GUARD-FAIL          something else owns or consumes this port
+#
+# The distinction matters: "I found no conflict" and "this port is yours" are different claims,
+# and a guard that reports the first as the second is a guard you should not trust.
+#
+# Exit: 0 confirmed | 1 inconclusive | 2 collision | 3 another deploy holds the lock
 set -uo pipefail
 
 APP="${1:?usage: port-guard.sh <app-name> <port> <allowed-owner-regex>}"
@@ -45,6 +53,11 @@ flock -n 9 || { echo "GUARD-FAIL: another deploy holds the lock ($LOCK)"; exit 3
 
 fail(){ echo "GUARD-FAIL: $*"; exit 2; }
 
+# Positive evidence that the port belongs to this app, as opposed to merely an absence of
+# evidence that it belongs to someone else.
+CONFIRMED=""
+confirm(){ CONFIRMED="${CONFIRMED}${CONFIRMED:+, }$1"; }
+
 # 1) STATIC - reverse proxy: does a foreign vhost already point at this port?
 # An adapter that cannot read its config tree must not look like "no consumers found" - that
 # would turn an unreadable proxy configuration into a GUARD-OK.
@@ -58,14 +71,18 @@ if [ "$ADAPTER" != "none" ]; then
   [ -r "$adapter_dir" ] || fail "adapter '$ADAPTER' cannot read its config directory: $adapter_dir"
 fi
 if foreign=$(adapter_consumers "$PORT" 2>/dev/null | grep -viE "$ALLOW" || true); [ -n "${foreign:-}" ]; then
-  fail "port $PORT is consumed by foreign proxy config(s): $(echo $foreign) (allowed: $ALLOW)"
+  fail "port $PORT is consumed by foreign proxy config(s): $(printf '%s' "$foreign" | tr '\n' ' ') (allowed: $ALLOW)"
+fi
+if [ "$ADAPTER" != "none" ]; then
+  mine=$(adapter_consumers "$PORT" 2>/dev/null | grep -iE "$ALLOW" || true)
+  [ -n "${mine:-}" ] && confirm "proxy config"
 fi
 
 # 2) STATIC - process manager: is the port hardcoded in someone else's config?
 if [ -n "$ECOSYSTEM" ]; then
   # shellcheck disable=SC2086
   bad_eco=$(grep -rlE "PORT[^0-9]{0,10}${PORT}([^0-9]|$)" $ECOSYSTEM 2>/dev/null | grep -viE "$ALLOW" || true)
-  [ -n "$bad_eco" ] && fail "port $PORT is statically reserved in another app's config: $(echo $bad_eco)"
+  [ -n "$bad_eco" ] && fail "port $PORT is statically reserved in another app's config: $(printf '%s' "$bad_eco" | tr '\n' ' ')"
 fi
 
 # 3) REGISTRY - declared owner must be this app, UNKNOWN, or absent
@@ -99,6 +116,7 @@ if [ -f "$REGISTRY" ]; then
   if [ -n "${owner:-}" ] && [ "$owner" != "$APP" ] && [ "$owner" != "UNKNOWN" ]; then
     fail "registry says port $PORT belongs to '$owner', not '$APP'"
   fi
+  [ "${owner:-}" = "$APP" ] && confirm "registry"
 fi
 
 # 4) RUNTIME - if something is listening, its working directory must match
@@ -108,7 +126,16 @@ pid=$(ss -lntpH 2>/dev/null \
 if [ -n "${pid:-}" ]; then
   cwd=$(readlink "/proc/$pid/cwd" 2>/dev/null || echo '')
   echo "$cwd" | grep -qiE "$ALLOW" || fail "port $PORT is bound by PID $pid (cwd=$cwd), which does not match /$ALLOW/"
+  confirm "running process"
 fi
 
-echo "GUARD-OK: port $PORT is reserved for '$APP' (allow=/$ALLOW/); no foreign consumers or reservations"
-exit 0
+if [ -n "$CONFIRMED" ]; then
+  echo "GUARD-OK: port $PORT is confirmed for '$APP' by: $CONFIRMED (no foreign consumers or reservations)"
+  exit 0
+fi
+
+# Nothing claimed the port - but nothing confirmed it is yours either. Saying "reserved for you"
+# here would be inventing a fact. Callers that want a hard gate should treat exit 1 as a stop.
+echo "GUARD-INCONCLUSIVE: no conflict found for port $PORT, but nothing confirms it belongs to '$APP'."
+echo "  Add it to the registry, wire a proxy consumer, or start the process - then re-run."
+exit 1

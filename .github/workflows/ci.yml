@@ -10,7 +10,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - run: sudo apt-get update -qq && sudo apt-get install -y shellcheck
-      - run: shellcheck --severity=warning port-guard.sh pm2-inventory.sh marker-healthcheck.sh adapters/*.sh tests/run_tests.sh
+      - run: shellcheck port-guard.sh pm2-inventory.sh marker-healthcheck.sh adapters/*.sh tests/run_tests.sh
   test:
     runs-on: ubuntu-latest
     steps:

@@ -21,6 +21,7 @@ TARGET="${HC_TARGET:-127.0.0.1}"
 [ -f "$CONF" ] || { echo "config not found: $CONF"; exit 2; }
 
 FAIL=0
+CHECKED=0
 while IFS='|' read -r port host want; do
   case "${port// /}" in ''|\#*) continue ;; esac
   port=$(echo "$port" | tr -d ' '); host=$(echo "$host" | tr -d ' ')
@@ -34,8 +35,22 @@ while IFS='|' read -r port host want; do
     continue
   fi
 
-  body=$(curl -s -L --max-time "$TIMEOUT" -H "Host: $host" "http://${TARGET}:${port}/" 2>/dev/null || true)
+  CHECKED=$((CHECKED+1))
+  # No -L: a redirect to some other host means this backend did not serve the marker, and
+  # following it would let an unrelated page satisfy the check. Capture the status separately so
+  # a marker found inside a 500 error page cannot pass as healthy.
+  resp=$(curl -s --max-time "$TIMEOUT" -H "Host: $host" -w '\n%{http_code}' \
+         "http://${TARGET}:${port}/" 2>/dev/null || true)
+  code=$(printf '%s' "$resp" | tail -n1)
+  body=$(printf '%s' "$resp" | sed '$d')
   title=$(printf '%s' "$body" | grep -oiE '<title>[^<]{0,60}' | head -1 | sed 's/<title>//I')
+
+  case "$code" in
+    2*) ;;
+    '')  echo "  ALERT :$port ($host) no response"; FAIL=1; continue ;;
+    3*)  echo "  ALERT :$port ($host) redirected ($code) - the backend did not serve this itself"; FAIL=1; continue ;;
+    *)   echo "  ALERT :$port ($host) HTTP $code"; FAIL=1; continue ;;
+  esac
 
   if printf '%s' "$body" | grep -qiE "$want"; then
     echo "  OK    :$port ($host) -> ${title:-no-title}"
@@ -45,4 +60,15 @@ while IFS='|' read -r port host want; do
   fi
 done < "$CONF"
 
-if [ "$FAIL" = "0" ]; then echo 'HEALTHCHECK: PASS'; exit 0; else echo 'HEALTHCHECK: FAIL'; exit 2; fi
+if [ "$CHECKED" -eq 0 ]; then
+  # An empty or comment-only config used to report PASS - a healthcheck that checked nothing and
+  # called it healthy, which is the most dangerous answer this script could give.
+  echo "HEALTHCHECK: NO CHECKS - $CONF defines nothing to verify" >&2
+  exit 2
+fi
+if [ "$FAIL" = "0" ]; then
+  echo "HEALTHCHECK: PASS ($CHECKED check(s))"
+  exit 0
+fi
+echo 'HEALTHCHECK: FAIL'
+exit 2
