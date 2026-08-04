@@ -32,6 +32,18 @@ APP="${1:?usage: port-guard.sh <app-name> <port> <allowed-owner-regex>}"
 PORT="${2:?missing port}"
 ALLOW="${3:?missing allowed-owner-regex}"
 
+case "$PORT" in
+  ''|*[!0-9]*) echo "GUARD-FAIL: port must be a number, got '$PORT'"; exit 2 ;;
+esac
+if [ "$PORT" -lt 1 ] || [ "$PORT" -gt 65535 ]; then
+  echo "GUARD-FAIL: port out of range: $PORT"; exit 2
+fi
+# ALLOW is used as an extended regex. grep exits 2 on an invalid pattern; without this check an
+# unparseable regex would make every match fail, which reads as "no foreign consumers found".
+if echo x | grep -qE "$ALLOW" 2>/dev/null; then :; elif [ $? -gt 1 ]; then
+  echo "GUARD-FAIL: allowed-owner-regex is not a valid extended regex: $ALLOW"; exit 2
+fi
+
 ADAPTER="${GUARD_ADAPTER:-none}"
 REGISTRY="${GUARD_REGISTRY:-./port-registry.yaml}"
 LOCK="${GUARD_LOCK:-/tmp/deploy-guard.lock}"
@@ -80,12 +92,21 @@ fi
 
 # 2) STATIC - process manager: is the port hardcoded in someone else's config?
 if [ -n "$ECOSYSTEM" ]; then
+  # A path that was configured but cannot be read is not the same as one with no match in it.
+  for _e in $ECOSYSTEM; do
+    if [ -e "$_e" ] && [ ! -r "$_e" ]; then
+      fail "process-manager config $_e exists but cannot be read"
+    fi
+  done
   # shellcheck disable=SC2086
   bad_eco=$(grep -rlE "PORT[^0-9]{0,10}${PORT}([^0-9]|$)" $ECOSYSTEM 2>/dev/null | grep -viE "$ALLOW" || true)
   [ -n "$bad_eco" ] && fail "port $PORT is statically reserved in another app's config: $(printf '%s' "$bad_eco" | tr '\n' ' ')"
 fi
 
 # 3) REGISTRY - declared owner must be this app, UNKNOWN, or absent
+if [ -e "$REGISTRY" ] && [ ! -r "$REGISTRY" ]; then
+  fail "registry $REGISTRY exists but cannot be read - refusing to treat that as 'no entry'"
+fi
 if [ -f "$REGISTRY" ]; then
   # Tolerate ordinary YAML variation - an unquoted key, a quoted value, a different indent,
   # an inline comment - while still requiring the port to be a TOP-LEVEL key. Matching a
@@ -120,12 +141,19 @@ if [ -f "$REGISTRY" ]; then
 fi
 
 # 4) RUNTIME - if something is listening, its working directory must match
-pid=$(ss -lntpH 2>/dev/null \
-  | grep -E "(127\.0\.0\.1|0\.0\.0\.0|\*|\[::\]):${PORT} " \
-  | grep -oE 'pid=[0-9]+' | head -1 | cut -d= -f2 || true)
-if [ -n "${pid:-}" ]; then
-  cwd=$(readlink "/proc/$pid/cwd" 2>/dev/null || echo '')
-  echo "$cwd" | grep -qiE "$ALLOW" || fail "port $PORT is bound by PID $pid (cwd=$cwd), which does not match /$ALLOW/"
+# Every listener on this port, not just the first: a process bound to one specific address can
+# sit alongside another, and checking only the first hides the second.
+listeners=$(ss -lntpH 2>/dev/null | awk -v p=":$PORT" '
+  { split($4, a, "%"); addr = a[1]
+    n = length(addr) - length(p)
+    if (n > 0 && substr(addr, n + 1) == p) print $0 }' | grep -oE 'pid=[0-9]+' | cut -d= -f2 | sort -u)
+
+if [ -n "${listeners:-}" ]; then
+  for lpid in $listeners; do
+    lcwd=$(readlink "/proc/$lpid/cwd" 2>/dev/null || echo '')
+    echo "$lcwd" | grep -qiE "$ALLOW" \
+      || fail "port $PORT is bound by PID $lpid (cwd=$lcwd), which does not match /$ALLOW/"
+  done
   confirm "running process"
 fi
 

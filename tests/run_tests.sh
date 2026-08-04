@@ -203,6 +203,45 @@ else
 fi
 rm -rf "$HC"
 
+# --- inputs are validated before they drive any decision ------------------------------------
+VAL=$(mktemp -d)
+printf '"3000":\n  app: example-web\n' > "$VAL/reg.yaml"
+
+GUARD_LOCK="$VAL/l1" GUARD_REGISTRY="$VAL/reg.yaml" \
+  "$ROOT/port-guard.sh" app abc 'app' >/dev/null 2>&1
+[ $? -eq 2 ] && ok 'rejects a non-numeric port' || no 'rejects a non-numeric port'
+
+GUARD_LOCK="$VAL/l2" GUARD_REGISTRY="$VAL/reg.yaml" \
+  "$ROOT/port-guard.sh" app 99999 'app' >/dev/null 2>&1
+[ $? -eq 2 ] && ok 'rejects a port outside 1-65535' || no 'rejects a port outside 1-65535'
+
+# An unparseable regex makes every grep fail, which would read as "no foreign consumers".
+OUT=$(GUARD_LOCK="$VAL/l3" GUARD_REGISTRY="$VAL/reg.yaml" \
+      "$ROOT/port-guard.sh" app 3000 'a[' 2>&1)
+printf '%s' "$OUT" | grep -q 'not a valid extended regex' \
+  && ok 'rejects an invalid allowed-owner-regex' || no 'rejects an invalid allowed-owner-regex'
+
+# A configured registry that cannot be read must not be treated as "no entry". Root ignores file
+# modes, so this one only means anything when run unprivileged.
+if command -v setpriv >/dev/null 2>&1 && [ "$(id -u)" = 0 ]; then
+  chmod 755 "$VAL"
+  cp "$ROOT/port-guard.sh" "$VAL/pg.sh"
+  mkdir -p "$VAL/adapters"; cp "$ROOT"/adapters/*.sh "$VAL/adapters/"
+  chmod -R a+rx "$VAL/pg.sh" "$VAL/adapters"
+  chmod 000 "$VAL/reg.yaml"
+  touch "$VAL/lock"; chmod 666 "$VAL/lock"
+  OUT=$(setpriv --reuid=65534 --regid=65534 --clear-groups \
+        env GUARD_LOCK="$VAL/lock" GUARD_REGISTRY="$VAL/reg.yaml" \
+        "$VAL/pg.sh" app 3000 'app' 2>&1)
+  printf '%s' "$OUT" | grep -q 'cannot be read' \
+    && ok 'an unreadable registry fails instead of reading as empty' \
+    || no 'an unreadable registry fails instead of reading as empty'
+  chmod 644 "$VAL/reg.yaml"
+else
+  ok 'unreadable-registry check skipped (needs root + setpriv to drop privileges)'
+fi
+rm -rf "$VAL"
+
 echo
 echo "passed=$PASS failed=$FAIL"
 [ "$FAIL" -eq 0 ]
