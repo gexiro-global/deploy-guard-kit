@@ -84,7 +84,8 @@ Writing one for Caddy or Apache is about five lines — see [`adapters/`](adapte
 | `GUARD_ADAPTER` | port-guard | `none` |
 | `GUARD_REGISTRY` | port-guard | `./port-registry.yaml` |
 | `GUARD_LOCK` | port-guard | `/tmp/deploy-guard.lock` |
-| `GUARD_ECOSYSTEM` | port-guard | unset (glob of process-manager configs to scan) |
+| `GUARD_ECOSYSTEM` | port-guard | unset (glob of process-manager configs to scan; if set, it must match at least one file) |
+| `GUARD_ALLOW_BROAD` | port-guard | `0` — set to `1` to permit an owner pattern that matches everything |
 | `PM2_JLIST_FILE` | pm2-inventory | unset (reads a saved `pm2 jlist` instead of calling pm2) |
 | `HC_TARGET` | marker-healthcheck | `127.0.0.1` |
 | `HC_TIMEOUT` | marker-healthcheck | `8` |
@@ -100,6 +101,11 @@ are different claims:
 | `GUARD-INCONCLUSIVE` | `1` | Nothing else claims the port, but nothing confirms it is yours either. Declare it somewhere, then re-run. |
 | `GUARD-FAIL` | `2` | Something else owns or consumes it. |
 | — | `3` | Another deploy holds the lock. |
+
+The `allowed-owner-regex` argument is refused if it matches unrelated strings - `.*`, `.`, `^`.
+Such a pattern filters every foreign proxy consumer out as "ours" and lets any process
+working directory confirm ownership, which turns the guard off without saying so. Name the
+app, or set `GUARD_ALLOW_BROAD=1` deliberately.
 
 If you use this as a hard gate, treat anything other than `0` as a stop. An earlier version
 reported success whenever it simply failed to find a conflict, which is the failure mode this

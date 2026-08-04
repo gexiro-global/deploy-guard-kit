@@ -279,9 +279,51 @@ else
 fi
 rm -rf "$RT"
 
+# --- an owner pattern that matches everything is the guard turned off ----------------------
+# With '.*' a foreign process holding the port was reported as GUARD-OK "confirmed by running
+# process": every foreign consumer is filtered out as ours, and any working directory matches.
+BRD=$(mktemp -d); mkdir -p "$BRD/bin"
+printf '%s\n' '#!/bin/bash' 'exit 0' > "$BRD/bin/ss"
+chmod +x "$BRD/bin/ss"
+printf '\"3000\":\n  app: myapp\n' > "$BRD/reg.yaml"
+
+for rx in '.*' '.' '^'; do
+  PATH="$BRD/bin:$PATH" GUARD_LOCK="$BRD/l" GUARD_REGISTRY="$BRD/reg.yaml" \
+    "$ROOT/port-guard.sh" myapp 3000 "$rx" >/dev/null 2>&1
+  [ $? -eq 2 ] && ok "refuses the catch-all owner pattern '$rx'" \
+               || no "refuses the catch-all owner pattern '$rx'"
+done
+
+PATH="$BRD/bin:$PATH" GUARD_LOCK="$BRD/l2" GUARD_REGISTRY="$BRD/reg.yaml" \
+  "$ROOT/port-guard.sh" myapp 3000 'example-web|example-api' >/dev/null 2>&1
+[ $? -eq 0 ] && ok 'a normal alternation pattern still works' \
+             || no 'a normal alternation pattern still works'
+
+PATH="$BRD/bin:$PATH" GUARD_ALLOW_BROAD=1 GUARD_LOCK="$BRD/l3" GUARD_REGISTRY="$BRD/reg.yaml" \
+  "$ROOT/port-guard.sh" myapp 3000 '.*' >/dev/null 2>&1
+[ $? -eq 0 ] && ok 'GUARD_ALLOW_BROAD is an explicit opt-out' \
+             || no 'GUARD_ALLOW_BROAD is an explicit opt-out'
+
+# A foreign process must fail with a real pattern - the case '.*' was hiding.
+printf '%s\n' '#!/bin/bash' "echo 'LISTEN 0 511 0.0.0.0:3000 0.0.0.0:* users:((\"other\",pid=1,fd=3))'" \
+  > "$BRD/bin/ss"
+chmod +x "$BRD/bin/ss"
+PATH="$BRD/bin:$PATH" GUARD_LOCK="$BRD/l4" GUARD_REGISTRY="$BRD/reg.yaml" \
+  "$ROOT/port-guard.sh" myapp 3000 'myapp' >/dev/null 2>&1
+[ $? -eq 2 ] && ok 'a foreign process on the port fails with a real pattern' \
+             || no 'a foreign process on the port fails with a real pattern'
+
+# A configured ecosystem glob that matches nothing is not "checked and clean".
+PATH="$BRD/bin:$PATH" GUARD_LOCK="$BRD/l5" GUARD_REGISTRY="$BRD/reg.yaml" \
+  GUARD_ECOSYSTEM="$BRD/nothing-here/*.js" "$ROOT/port-guard.sh" myapp 3000 'myapp' >/dev/null 2>&1
+[ $? -eq 2 ] && ok 'an ecosystem glob matching nothing fails instead of passing quietly' \
+             || no 'an ecosystem glob matching nothing fails instead of passing quietly'
+rm -rf "$BRD"
+
 echo
 echo "passed=$PASS failed=$FAIL"
 [ "$FAIL" -eq 0 ]
+
 
 
 

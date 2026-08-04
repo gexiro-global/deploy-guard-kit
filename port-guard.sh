@@ -44,6 +44,19 @@ if echo x | grep -qE "$ALLOW" 2>/dev/null; then :; elif [ $? -gt 1 ]; then
   echo "GUARD-FAIL: allowed-owner-regex is not a valid extended regex: $ALLOW"; exit 2
 fi
 
+# A pattern that matches everything - '.*', '.', '^' - turns the guard off without saying so:
+# every foreign proxy consumer is filtered out as "ours", and any process working directory
+# confirms ownership. A genuine owner pattern never matches an unrelated random string.
+if [ "${GUARD_ALLOW_BROAD:-0}" != "1" ]; then
+  _probe=zzq7x-not-an-owner-9f3b1e
+  if printf '%s' "$_probe" | grep -qE "$ALLOW" 2>/dev/null; then
+    echo "GUARD-FAIL: allowed-owner-regex '$ALLOW' matches unrelated strings, so it would"
+    echo "  confirm any process and hide every foreign consumer. Name the app, or set"
+    echo "  GUARD_ALLOW_BROAD=1 if you really mean it."
+    exit 2
+  fi
+fi
+
 ADAPTER="${GUARD_ADAPTER:-none}"
 REGISTRY="${GUARD_REGISTRY:-./port-registry.yaml}"
 LOCK="${GUARD_LOCK:-/tmp/deploy-guard.lock}"
@@ -94,11 +107,18 @@ fi
 # 2) STATIC - process manager: is the port hardcoded in someone else's config?
 if [ -n "$ECOSYSTEM" ]; then
   # A path that was configured but cannot be read is not the same as one with no match in it.
+  # Neither is a glob that matches nothing: the operator named something, and silently
+  # checking zero files looks identical to checking them and finding no conflict.
+  _eco_seen=0
   for _e in $ECOSYSTEM; do
-    if [ -e "$_e" ] && [ ! -r "$_e" ]; then
-      fail "process-manager config $_e exists but cannot be read"
+    if [ -e "$_e" ]; then
+      _eco_seen=$((_eco_seen + 1))
+      [ -r "$_e" ] || fail "process-manager config $_e exists but cannot be read"
     fi
   done
+  if [ "$_eco_seen" -eq 0 ]; then
+    fail "GUARD_ECOSYSTEM was set but matched no files: $ECOSYSTEM"
+  fi
   # shellcheck disable=SC2086
   bad_eco=$(grep -rlE "PORT[^0-9]{0,10}${PORT}([^0-9]|$)" $ECOSYSTEM 2>/dev/null | grep -viE "$ALLOW" || true)
   [ -n "$bad_eco" ] && fail "port $PORT is statically reserved in another app's config: $(printf '%s' "$bad_eco" | tr '\n' ' ')"
