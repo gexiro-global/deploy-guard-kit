@@ -68,6 +68,7 @@ fail(){ echo "GUARD-FAIL: $*"; exit 2; }
 # Positive evidence that the port belongs to this app, as opposed to merely an absence of
 # evidence that it belongs to someone else.
 CONFIRMED=""
+RUNTIME_UNKNOWN=0
 confirm(){ CONFIRMED="${CONFIRMED}${CONFIRMED:+, }$1"; }
 
 # 1) STATIC - reverse proxy: does a foreign vhost already point at this port?
@@ -143,23 +144,54 @@ fi
 # 4) RUNTIME - if something is listening, its working directory must match
 # Every listener on this port, not just the first: a process bound to one specific address can
 # sit alongside another, and checking only the first hides the second.
-listeners=$(ss -lntpH 2>/dev/null | awk -v p=":$PORT" '
-  { split($4, a, "%"); addr = a[1]
-    n = length(addr) - length(p)
-    if (n > 0 && substr(addr, n + 1) == p) print $0 }' | grep -oE 'pid=[0-9]+' | cut -d= -f2 | sort -u)
+if ! command -v ss >/dev/null 2>&1; then
+  # Without ss there is no runtime evidence at all. Say so rather than let the other checks
+  # produce a GUARD-OK that implies the socket was inspected.
+  echo "NOTE: ss is not available; the runtime check did not run" >&2
+  RUNTIME_UNKNOWN=1
+else
+  ss_out=$(ss -lntpH 2>/dev/null)
+  ss_rc=$?
+  if [ "$ss_rc" -ne 0 ]; then
+    echo "NOTE: ss failed (exit $ss_rc); the runtime check did not run" >&2
+    RUNTIME_UNKNOWN=1
+  else
+    # Sockets on this port, whatever address they are bound to.
+    socket_lines=$(printf '%s\n' "$ss_out" | awk -v p=":$PORT" '
+      { split($4, a, "%"); addr = a[1]
+        n = length(addr) - length(p)
+        if (n > 0 && substr(addr, n + 1) == p) print $0 }')
 
-if [ -n "${listeners:-}" ]; then
-  for lpid in $listeners; do
-    lcwd=$(readlink "/proc/$lpid/cwd" 2>/dev/null || echo '')
-    echo "$lcwd" | grep -qiE "$ALLOW" \
-      || fail "port $PORT is bound by PID $lpid (cwd=$lcwd), which does not match /$ALLOW/"
-  done
-  confirm "running process"
+    if [ -n "${socket_lines:-}" ]; then
+      listeners=$(printf '%s\n' "$socket_lines" | grep -oE 'pid=[0-9]+' | cut -d= -f2 | sort -u)
+      if [ -z "${listeners:-}" ]; then
+        # Something holds the port but ss could not attribute it - usually insufficient
+        # privileges. Treating that as "no listener" would confirm a port that is demonstrably
+        # in use by an unidentifiable process.
+        fail "port $PORT is in use but no owning process could be identified (run with more privilege)"
+      fi
+      for lpid in $listeners; do
+        lcwd=$(readlink "/proc/$lpid/cwd" 2>/dev/null || echo '')
+        if [ -z "$lcwd" ]; then
+          fail "port $PORT is bound by PID $lpid whose working directory cannot be read"
+        fi
+        echo "$lcwd" | grep -qiE "$ALLOW" \
+          || fail "port $PORT is bound by PID $lpid (cwd=$lcwd), which does not match /$ALLOW/"
+      done
+      confirm "running process"
+    fi
+  fi
+fi
+
+if [ -n "$CONFIRMED" ] && [ "$RUNTIME_UNKNOWN" = "0" ]; then
+  echo "GUARD-OK: port $PORT is confirmed for '$APP' by: $CONFIRMED (no foreign consumers or reservations)"
+  exit 0
 fi
 
 if [ -n "$CONFIRMED" ]; then
-  echo "GUARD-OK: port $PORT is confirmed for '$APP' by: $CONFIRMED (no foreign consumers or reservations)"
-  exit 0
+  echo "GUARD-INCONCLUSIVE: $CONFIRMED confirms port $PORT for '$APP', but the runtime check could"
+  echo "  not run, so nothing rules out another process already holding it."
+  exit 1
 fi
 
 # Nothing claimed the port - but nothing confirmed it is yours either. Saying "reserved for you"

@@ -14,6 +14,14 @@ ok(){ echo "  ok   - $1"; PASS=$((PASS+1)); }
 no(){ echo "  FAIL - $1"; FAIL=$((FAIL+1)); }
 REG="$ROOT/examples/port-registry.example.yaml"
 
+# A stub `ss` reporting no listeners. Without it these cases would be INCONCLUSIVE on any machine
+# lacking iproute2 - correct behaviour, but not what they mean to test.
+SSDIR=$(mktemp -d)
+printf '%s\n' '#!/bin/bash' 'exit 0' > "$SSDIR/ss"
+chmod +x "$SSDIR/ss"
+PATH="$SSDIR:$PATH"
+export PATH
+
 echo '== port-guard =='
 GUARD_LOCK=$(mktemp); export GUARD_LOCK
 
@@ -241,6 +249,35 @@ else
   ok 'unreadable-registry check skipped (needs root + setpriv to drop privileges)'
 fi
 rm -rf "$VAL"
+
+# --- runtime evidence must be real evidence -------------------------------------------------
+# A socket nobody can attribute is not "no listener": it is a port demonstrably in use by an
+# unidentifiable process, which must never be reported as confirmed.
+RT=$(mktemp -d); mkdir -p "$RT/bin"
+printf '%s\n' '#!/bin/bash' 'echo "LISTEN 0 511 0.0.0.0:3000 0.0.0.0:*"' > "$RT/bin/ss"
+chmod +x "$RT/bin/ss"
+OUT=$(PATH="$RT/bin:$PATH" GUARD_LOCK="$RT/l1" GUARD_REGISTRY="$REG" \
+      "$ROOT/port-guard.sh" example-web 3000 'example-web' 2>&1)
+RT_RC=$?
+if [ "$RT_RC" -eq 2 ] && printf '%s' "$OUT" | grep -q 'no owning process could be identified'; then
+  ok 'a socket with no attributable process fails instead of confirming'
+else
+  no "a socket with no attributable process fails instead of confirming (rc=$RT_RC)"
+fi
+
+# ss missing entirely: the other checks may still confirm, but the verdict cannot be a confident
+# OK when nothing observed the socket.
+printf '%s\n' '#!/bin/bash' 'exit 1' > "$RT/bin/ss"
+chmod +x "$RT/bin/ss"
+OUT=$(PATH="$RT/bin:$PATH" GUARD_LOCK="$RT/l2" GUARD_REGISTRY="$REG" \
+      "$ROOT/port-guard.sh" example-web 3000 'example-web' 2>&1)
+RT_RC=$?
+if [ "$RT_RC" -eq 1 ] && printf '%s' "$OUT" | grep -q 'GUARD-INCONCLUSIVE'; then
+  ok 'a failing ss downgrades the verdict rather than being ignored'
+else
+  no "a failing ss downgrades the verdict rather than being ignored (rc=$RT_RC)"
+fi
+rm -rf "$RT"
 
 echo
 echo "passed=$PASS failed=$FAIL"
