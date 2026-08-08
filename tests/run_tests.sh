@@ -387,6 +387,31 @@ for own in 'myapp' '.*' '.' '^' '^/' '^/[a-z]+/' '^/[^ez]'; do
                || no "a foreign process fails even with owner token '$own' (literal must not confirm)"
 done
 
+# Runtime cwd ownership is matched at PATH-COMPONENT boundaries, not as a loose
+# substring. Use a real backgrounded process whose cwd we control.
+CT=$(mktemp -d); mkdir -p "$CT/srv/foreignstuff" "$CT/srv/foreign/app" "$CT/bin"
+( cd "$CT/srv/foreignstuff" && exec sleep 30 ) & SUBPID=$!
+printf '%s\n' '#!/bin/bash' "echo \"LISTEN 0 511 0.0.0.0:3000 0.0.0.0:* users:((\\\"x\\\",pid=$SUBPID,fd=3))\"" > "$CT/bin/ss"
+chmod +x "$CT/bin/ss"
+# token 'foreign' is a substring of 'foreignstuff' but not a whole path component -> foreign
+PATH="$CT/bin:$PATH" GUARD_LOCK_DIR="$CT/lk" GUARD_REGISTRY="$CT/absent.yaml" \
+  "$ROOT/port-guard.sh" myapp 3000 'foreign' >/dev/null 2>&1
+RC=$?
+kill "$SUBPID" 2>/dev/null
+[ "$RC" -eq 2 ] && ok 'a cwd containing the token only as a substring is treated as foreign' \
+               || no "a cwd substring (not a path component) is treated as foreign (rc=$RC)"
+
+# ...but the same token DOES confirm when it is a real path component of the cwd.
+( cd "$CT/srv/foreign/app" && exec sleep 30 ) & SUBPID2=$!
+printf '%s\n' '#!/bin/bash' "echo \"LISTEN 0 511 0.0.0.0:3000 0.0.0.0:* users:((\\\"x\\\",pid=$SUBPID2,fd=3))\"" > "$CT/bin/ss"
+chmod +x "$CT/bin/ss"
+PATH="$CT/bin:$PATH" GUARD_LOCK_DIR="$CT/lk2" GUARD_REGISTRY="$CT/absent.yaml" \
+  "$ROOT/port-guard.sh" myapp 3000 'foreign' >/dev/null 2>&1
+RC=$?
+kill "$SUBPID2" 2>/dev/null; rm -rf "$CT"
+[ "$RC" -eq 0 ] && ok 'a cwd with the token as a whole path component confirms ownership' \
+               || no "a cwd path-component match confirms ownership (rc=$RC)"
+
 # A token that is only slashes/space is a substring of every absolute cwd; it must be
 # refused outright rather than confirm any listener.
 for own in '/' '//' ' / '; do

@@ -52,6 +52,7 @@ fi
 # foreign consumer. Detecting a "too-broad" regex is undecidable; a fixed-string
 # token simply cannot be broad, so we match literally and drop the regex entirely.
 OWNER_ARGS=()
+OWNER_TOKENS=()
 _oldifs=$IFS; IFS='|'
 for _t in $ALLOW; do
   [ -n "$_t" ] || continue
@@ -64,11 +65,32 @@ for _t in $ALLOW; do
     exit 2
   fi
   OWNER_ARGS+=(-e "$_t")
+  OWNER_TOKENS+=("$_t")
 done
 IFS=$_oldifs
 [ "${#OWNER_ARGS[@]}" -gt 0 ] || { echo "GUARD-FAIL: no owner token given in '$ALLOW'"; exit 2; }
 owner_match(){ grep -iF "${OWNER_ARGS[@]}"; }    # keep lines containing any owner token
 owner_reject(){ grep -ivF "${OWNER_ARGS[@]}"; }  # keep lines containing no owner token
+
+# Ownership of a LISTENER's working directory is matched at PATH-COMPONENT boundaries,
+# not as a loose substring: owner token 'foreign' matches cwd '/srv/foreign/app' but
+# NOT '/srv/foreignstuff'. This stops a token from confirming an unrelated process
+# whose path merely contains the token as a substring. Case-insensitive.
+cwd_owned(){
+  local cwd padded t
+  cwd=$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]')
+  padded="/${cwd#/}/"
+  for t in "${OWNER_TOKENS[@]}"; do
+    t=$(printf '%s' "$t" | tr '[:upper:]' '[:lower:]')
+    case "$t" in
+      */*)  # a path-fragment token: match as a bounded path substring
+        case "$padded" in *"/${t#/}/"*|*"/${t#/}"*|*"${t%/}/"*) return 0 ;; esac ;;
+      *)    # a name token: must be a whole path component
+        case "$padded" in *"/$t/"*) return 0 ;; esac ;;
+    esac
+  done
+  return 1
+}
 
 ADAPTER="${GUARD_ADAPTER:-none}"
 REGISTRY="${GUARD_REGISTRY:-./port-registry.yaml}"
@@ -239,8 +261,8 @@ else
         if [ -z "$lcwd" ]; then
           fail "port $PORT is bound by PID $lpid whose working directory cannot be read"
         fi
-        printf '%s' "$lcwd" | owner_match >/dev/null \
-          || fail "port $PORT is bound by PID $lpid (cwd=$lcwd), which matches no owner token in '$ALLOW'"
+        cwd_owned "$lcwd" \
+          || fail "port $PORT is bound by PID $lpid (cwd=$lcwd), which matches no owner token in '$ALLOW' at a path boundary"
       done
       confirm "running process"
     fi

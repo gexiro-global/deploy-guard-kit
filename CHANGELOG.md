@@ -15,7 +15,10 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   ownership identity could be crafted to match every process cwd (e.g. `^/[a-z]+/`)
   and confirm any listener; detecting a "too-broad" regex is undecidable, so ownership
   is matched literally and cannot be broad. Alternation via `|` still works
-  (`example-web|example-api`); `GUARD_ALLOW_BROAD` is removed (no longer needed).
+  (`example-web|example-api`); `GUARD_ALLOW_BROAD` is removed (no longer needed). A
+  listener's working directory is matched at **path-component boundaries** (owner
+  `foreign` matches `/srv/foreign/app` but not `/srv/foreignstuff`), and a slash-only
+  token is rejected as too generic.
 
 ### Fixed
 - A reverse-proxy adapter that hits an unreadable config file OR an inaccessible
