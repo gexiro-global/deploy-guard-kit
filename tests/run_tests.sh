@@ -367,6 +367,19 @@ for own in 'myapp' '.*' '.' '^' '^/' '^/[a-z]+/' '^/[^ez]'; do
                || no "a foreign process fails even with owner token '$own' (literal must not confirm)"
 done
 
+# A token that is only slashes/space is a substring of every absolute cwd; it must be
+# refused outright rather than confirm any listener.
+for own in '/' '//' ' / '; do
+  OUT=$(PATH="$BRD/bin:$PATH" GUARD_LOCK_DIR="$BRD/l6" GUARD_REGISTRY="$BRD/reg.yaml" \
+        "$ROOT/port-guard.sh" myapp 3000 "$own" 2>&1)
+  RC=$?
+  if [ "$RC" -eq 2 ] && printf '%s' "$OUT" | grep -q 'too generic'; then
+    ok "refuses a slash-only owner token '$own'"
+  else
+    no "refuses a slash-only owner token '$own' (rc=$RC)"
+  fi
+done
+
 # A configured ecosystem glob that matches nothing is not "checked and clean".
 PATH="$BRD/bin:$PATH" GUARD_LOCK_DIR="$BRD/l5" GUARD_REGISTRY="$BRD/reg.yaml" \
   GUARD_ECOSYSTEM="$BRD/nothing-here/*.js" "$ROOT/port-guard.sh" myapp 3000 'myapp' >/dev/null 2>&1

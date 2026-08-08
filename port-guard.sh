@@ -53,7 +53,18 @@ fi
 # token simply cannot be broad, so we match literally and drop the regex entirely.
 OWNER_ARGS=()
 _oldifs=$IFS; IFS='|'
-for _t in $ALLOW; do [ -n "$_t" ] && OWNER_ARGS+=(-e "$_t"); done
+for _t in $ALLOW; do
+  [ -n "$_t" ] || continue
+  # A token made only of slashes/whitespace (e.g. '/') is a substring of every
+  # absolute working directory, so it would confirm any listener. Require each token
+  # to carry a real identifying character.
+  if [ -z "$(printf '%s' "$_t" | tr -d '[:space:]/')" ]; then
+    IFS=$_oldifs
+    echo "GUARD-FAIL: owner token '$_t' is too generic (matches every path); name the app or a real path fragment"
+    exit 2
+  fi
+  OWNER_ARGS+=(-e "$_t")
+done
 IFS=$_oldifs
 [ "${#OWNER_ARGS[@]}" -gt 0 ] || { echo "GUARD-FAIL: no owner token given in '$ALLOW'"; exit 2; }
 owner_match(){ grep -iF "${OWNER_ARGS[@]}"; }    # keep lines containing any owner token
