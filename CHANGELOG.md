@@ -8,7 +8,8 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - `port-guard.sh` locks a validated, owner-checked directory under `/run/lock` opened
   read-only, replacing a predictable `/tmp` lock file opened with `>` that a local
   user could redirect at an arbitrary root-writable file (CWE-59). Lock env var is now
-  `GUARD_LOCK_DIR`.
+  `GUARD_LOCK_DIR`. The whole lock-path **ancestor chain** is validated (no symlink or
+  untrusted-owner component), not just the final directory.
 - **Breaking:** the `<allowed-owner>` argument is now a `|`-separated list of LITERAL
   owner tokens matched as fixed strings, not a regex. An arbitrary regex used as an
   ownership identity could be crafted to match every process cwd (e.g. `^/[a-z]+/`)

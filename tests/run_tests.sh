@@ -45,6 +45,26 @@ rm -rf "$CLOCK"
   && ok 'refuses to run while another deploy holds the lock' \
   || no 'refuses to run while another deploy holds the lock'
 
+# A symlinked lock-path ANCESTOR must be refused, not just the final component.
+SA=$(mktemp -d); ln -s /tmp "$SA/link"
+GUARD_LOCK_DIR="$SA/link/sub" GUARD_REGISTRY="$REG" \
+  "$ROOT/port-guard.sh" example-web 3000 'example-web' >/dev/null 2>&1
+RC=$?; rm -rf "$SA"
+[ "$RC" -eq 3 ] && ok 'refuses a symlinked lock-path ancestor' \
+               || no "refuses a symlinked lock-path ancestor (rc=$RC)"
+
+# A lock-path ancestor owned by another user must be refused (needs root to set up).
+if [ "$(id -u)" = 0 ]; then
+  OA=$(mktemp -d); mkdir -p "$OA/anc"; chown 65534 "$OA/anc"
+  GUARD_LOCK_DIR="$OA/anc/sub" GUARD_REGISTRY="$REG" \
+    "$ROOT/port-guard.sh" example-web 3000 'example-web' >/dev/null 2>&1
+  RC=$?; rm -rf "$OA"
+  [ "$RC" -eq 3 ] && ok 'refuses a lock-path ancestor owned by another user' \
+                 || no "refuses a lock-path ancestor owned by another user (rc=$RC)"
+else
+  ok 'ancestor-ownership check skipped (needs root)'
+fi
+
 echo '== pm2-inventory =='
 INV="$ROOT/examples/pm2-inventory.example.yaml"
 

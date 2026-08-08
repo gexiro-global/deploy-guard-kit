@@ -92,6 +92,23 @@ esac
 # shellcheck source=/dev/null
 . "$HERE/adapters/${ADAPTER}.sh" || { echo "GUARD-FAIL: cannot load adapter '$ADAPTER'"; exit 2; }
 
+# Validate the whole ANCESTOR chain before creating/opening the lock dir: a symlink
+# or untrusted-owner ancestor could be retargeted to redirect where we mkdir and
+# open (the final-component check alone is not enough). Reject any existing ancestor
+# that is a symlink or owned by neither root nor us. (bash cannot do a fully atomic
+# O_NOFOLLOW walk; validating trusted, non-symlink ancestors makes a retarget require
+# write access to a trusted-owned directory, which an unprivileged attacker lacks.)
+_lp=$(dirname "$LOCK_DIR")
+while :; do
+  if [ -L "$_lp" ]; then echo "GUARD-FAIL: lock path ancestor is a symlink: $_lp"; exit 3; fi
+  if [ -e "$_lp" ]; then
+    _lo=$(stat -c %u "$_lp" 2>/dev/null)
+    if [ "$_lo" != "0" ] && [ "$_lo" != "$MY_UID" ]; then
+      echo "GUARD-FAIL: lock path ancestor $_lp is owned by uid $_lo (not root or you)"; exit 3
+    fi
+  fi
+  _lparent=$(dirname "$_lp"); [ "$_lparent" = "$_lp" ] && break; _lp="$_lparent"
+done
 mkdir -p "$LOCK_DIR" 2>/dev/null
 if [ -L "$LOCK_DIR" ] || [ ! -d "$LOCK_DIR" ] || [ "$(stat -c %u "$LOCK_DIR" 2>/dev/null)" != "$MY_UID" ]; then
   echo "GUARD-FAIL: unsafe lock dir $LOCK_DIR (must be a non-symlink directory owned by uid $MY_UID)"; exit 3
