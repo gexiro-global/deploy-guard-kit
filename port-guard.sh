@@ -51,23 +51,31 @@ fi
 # confirms ownership. A genuine owner pattern never matches an unrelated random string.
 if [ "${GUARD_ALLOW_BROAD:-0}" != "1" ]; then
   # A legitimate owner pattern identifies ONE app; it must not match unrelated
-  # strings. Probe several structurally different canaries - a random token, two
-  # absolute paths (these catch '^/' and other '/'-anchored patterns that match
-  # every process cwd but not a bare token), and an address - because a single
-  # negative probe cannot establish broadness.
-  for _probe in \
-    'zzq7x-not-an-owner-9f3b1e' \
-    '/zzq7x/not/an/owner/9f3b1e' \
-    '/etc/shadow' \
-    '10.11.12.13:4567' \
-    'unrelated-service-name-xyz'; do
-    if printf '%s' "$_probe" | grep -qE "$ALLOW" 2>/dev/null; then
-      echo "GUARD-FAIL: allowed-owner-regex '$ALLOW' matches unrelated strings (e.g. '$_probe'),"
-      echo "  so it would confirm any process and hide every foreign consumer. Name the app,"
-      echo "  or set GUARD_ALLOW_BROAD=1 if you really mean it."
-      exit 2
-    fi
+  # strings. A FIXED probe set is always defeatable by a pattern crafted around it
+  # (e.g. '^/[^ez]' dodges fixed canaries yet matches every real process cwd), so
+  # generate RANDOM canaries each run - as bare tokens and as absolute paths - and
+  # refuse any pattern that matches one. A pattern broad enough to match arbitrary
+  # absolute paths/tokens is caught with overwhelming probability; a specific owner
+  # name/path matches none of them.
+  _rand(){ head -c 24 /dev/urandom 2>/dev/null | LC_ALL=C tr -dc 'A-Za-z0-9' | cut -c1-16; }
+  _broad=0
+  # Build a canary for '/' followed by EVERY possible first character, each with a
+  # random tail: '/a<rand>', '/b<rand>', ... '/9<rand>'. Any '^/[class]' pattern (or
+  # '^/', '.', '.*', '^') matches at least one of these, so it is refused; but a
+  # specific owner - a name or a real path like 'app' or '/srv/app' - matches none of
+  # them (each canary is a single letter plus 16 random chars, not a real word).
+  for _c in a b c d e f g h i j k l m n o p q r s t u v w x y z 0 1 2 3 4 5 6 7 8 9; do
+    _r=$(_rand); [ -n "$_r" ] || _r="fb${RANDOM}${RANDOM}"
+    for _probe in "$_r" "/${_c}${_r}"; do
+      if printf '%s' "$_probe" | grep -qE "$ALLOW" 2>/dev/null; then _broad=1; break 2; fi
+    done
   done
+  if [ "$_broad" = "1" ]; then
+    echo "GUARD-FAIL: allowed-owner-regex '$ALLOW' matches unrelated random strings, so it"
+    echo "  would confirm any process and hide every foreign consumer. Name the app/path,"
+    echo "  or set GUARD_ALLOW_BROAD=1 if you really mean it."
+    exit 2
+  fi
 fi
 
 ADAPTER="${GUARD_ADAPTER:-none}"

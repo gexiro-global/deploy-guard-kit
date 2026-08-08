@@ -159,6 +159,28 @@ else
   ok 'adapter-unreadable-file check skipped (needs root + setpriv)'
 fi
 
+# An unreadable SUBTREE (find cannot descend) must also fail, not be silently skipped.
+if command -v setpriv >/dev/null 2>&1 && [ "$(id -u)" = 0 ]; then
+  AT=$(mktemp -d); chmod 755 "$AT"
+  mkdir -p "$AT/conf/sub"; printf 'proxy_pass http://127.0.0.1:3000;\n' > "$AT/conf/sub/site.conf"
+  cp "$ROOT/port-guard.sh" "$AT/pg.sh"; mkdir -p "$AT/adapters"; cp "$ROOT"/adapters/*.sh "$AT/adapters/"
+  chmod -R a+rx "$AT/pg.sh" "$AT/adapters"; chmod a+rx "$AT/conf"
+  chmod 000 "$AT/conf/sub"                 # find cannot descend into this subtree
+  mkdir -p "$AT/lockdir"; chown 65534 "$AT/lockdir"
+  OUT=$(setpriv --reuid=65534 --regid=65534 --clear-groups \
+        env GUARD_ADAPTER=nginx NGINX_CONF_DIR="$AT/conf" GUARD_LOCK_DIR="$AT/lockdir" GUARD_REGISTRY="$REG" \
+        "$AT/pg.sh" example-web 3000 'example-web' 2>&1)
+  RC=$?
+  chmod -R 755 "$AT/conf" 2>/dev/null; rm -rf "$AT"
+  if [ "$RC" -eq 2 ] && printf '%s' "$OUT" | grep -q 'could not fully read'; then
+    ok 'an inaccessible adapter subtree fails instead of reading as no-consumers'
+  else
+    no "an inaccessible adapter subtree fails instead of reading as no-consumers (rc=$RC)"
+  fi
+else
+  ok 'adapter-inaccessible-subtree check skipped (needs root + setpriv)'
+fi
+
 # The registry parser must key off TOP-LEVEL entries only. A nested key with the same name is
 # unrelated metadata; treating it as the registry entry lets the wrong thing decide ownership.
 PARSE=$(mktemp -d)
@@ -325,8 +347,10 @@ chmod +x "$BRD/bin/ss"
 printf '\"3000\":\n  app: myapp\n' > "$BRD/reg.yaml"
 
 # '^/' matched every absolute process cwd but not the old single random probe, so it
-# confirmed any listener as the owner. It must be refused like the other catch-alls.
-for rx in '.*' '.' '^' '^/' '/'; do
+# confirmed any listener as the owner. Crafted variants ('^/[^ez]', '^/[a-z]', '^/w')
+# dodge a FIXED probe set but still match real cwds; the randomized/rooted canaries
+# must refuse them too.
+for rx in '.*' '.' '^' '^/' '/' '^/[^ez]' '^/[a-z]' '^/w'; do
   PATH="$BRD/bin:$PATH" GUARD_LOCK_DIR="$BRD/l" GUARD_REGISTRY="$BRD/reg.yaml" \
     "$ROOT/port-guard.sh" myapp 3000 "$rx" >/dev/null 2>&1
   [ $? -eq 2 ] && ok "refuses the catch-all owner pattern '$rx'" \

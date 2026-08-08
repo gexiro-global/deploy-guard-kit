@@ -9,13 +9,16 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   read-only, replacing a predictable `/tmp` lock file opened with `>` that a local
   user could redirect at an arbitrary root-writable file (CWE-59). Lock env var is now
   `GUARD_LOCK_DIR`.
-- The over-broad owner-pattern guard now probes several structurally different
-  canaries, so `^/` (and other absolute-path-anchored patterns that matched every
-  process cwd) are refused, not just literal `.*`/`.`/`^`.
+- The over-broad owner-pattern guard now probes a complete set of canaries - `/`
+  followed by every possible first character plus a random tail - so `^/` and every
+  `^/[class]`-style pattern (which match arbitrary process cwds) are refused, while
+  a specific owner name or path is not. `GUARD_ALLOW_BROAD=1` remains the explicit
+  opt-out.
 
 ### Fixed
-- A reverse-proxy adapter that hits an unreadable config file now fails (exit 2)
-  instead of flattening into an empty "no consumers" result.
+- A reverse-proxy adapter that hits an unreadable config file OR an inaccessible
+  subtree (a `find` traversal error) now fails (exit 2) instead of flattening into
+  an empty "no consumers" result.
 - `pm2-inventory.sh`: a declared app with no `cwd` now fails instead of being
   silently skipped while the inventory still reported PASS.
 
