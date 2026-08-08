@@ -23,7 +23,7 @@ PATH="$SSDIR:$PATH"
 export PATH
 
 echo '== port-guard =='
-GUARD_LOCK=$(mktemp); export GUARD_LOCK
+GUARD_LOCK_DIR=$(mktemp -d); export GUARD_LOCK_DIR
 
 GUARD_REGISTRY="$REG" "$ROOT/port-guard.sh" example-web 3000 'example-web' >/dev/null 2>&1 \
   && ok 'accepts the declared owner of a port' || no 'accepts the declared owner of a port'
@@ -35,14 +35,15 @@ GUARD_REGISTRY="$REG" "$ROOT/port-guard.sh" anything 3002 'anything' >/dev/null 
 [ $? -eq 1 ] && ok 'UNKNOWN owner is inconclusive: not a collision, not a confirmation' \
              || no 'UNKNOWN owner is inconclusive: not a collision, not a confirmation'
 
-RC_FILE=$(mktemp)
-( flock -n 9 || exit 1
-  GUARD_REGISTRY="$REG" "$ROOT/port-guard.sh" example-web 3000 'example-web' >/dev/null 2>&1
-  echo $? > "$RC_FILE" ) 9>"$GUARD_LOCK"
-[ "$(cat "$RC_FILE" 2>/dev/null)" = "3" ] \
+CLOCK=$(mktemp -d)
+exec 200<"$CLOCK"; flock -n 200 || no 'test could not take its own lock'
+GUARD_LOCK_DIR="$CLOCK" GUARD_REGISTRY="$REG" "$ROOT/port-guard.sh" example-web 3000 'example-web' >/dev/null 2>&1
+RC=$?
+exec 200<&-
+rm -rf "$CLOCK"
+[ "$RC" -eq 3 ] \
   && ok 'refuses to run while another deploy holds the lock' \
   || no 'refuses to run while another deploy holds the lock'
-rm -f "$GUARD_LOCK" "$RC_FILE"
 
 echo '== pm2-inventory =='
 INV="$ROOT/examples/pm2-inventory.example.yaml"
@@ -56,6 +57,19 @@ if [ $RC -ne 0 ] && printf '%s' "$OUT" | grep -q 'WRONG CWD'; then
   ok 'detects right-name/wrong-cwd drift'
 else
   no 'detects right-name/wrong-cwd drift'
+fi
+
+# A declared app with no cwd cannot be verified; skipping it and still passing made an
+# incomplete inventory indistinguishable from a verified one.
+MC=$(mktemp -d)
+printf 'nocwd-app:\n' > "$MC/inv.yaml"
+OUT=$(PM2_JLIST_FILE="$HERE/fixtures/pm2-jlist-ok.json" "$ROOT/pm2-inventory.sh" "$MC/inv.yaml" 2>&1)
+RC=$?
+rm -rf "$MC"
+if [ "$RC" -ne 0 ] && printf '%s' "$OUT" | grep -q 'no cwd declared'; then
+  ok 'a declared app with no cwd fails instead of being silently skipped'
+else
+  no "a declared app with no cwd fails instead of being silently skipped (rc=$RC)"
 fi
 
 echo '== marker-healthcheck =='
@@ -105,39 +119,62 @@ rm -rf "$STUB2"
 # meant a reformatted registry stopped protecting anything.
 REGVAR=$(mktemp -d)
 printf '3000:\n    app: "example-web"\n    cwd: /srv/x\n' > "$REGVAR/unquoted.yaml"
-GUARD_LOCK="$REGVAR/l1" GUARD_REGISTRY="$REGVAR/unquoted.yaml" \
+GUARD_LOCK_DIR="$REGVAR/l1" GUARD_REGISTRY="$REGVAR/unquoted.yaml" \
   "$ROOT/port-guard.sh" other-app 3000 'other-app' >/dev/null 2>&1
 [ $? -eq 2 ] && ok 'reads an unquoted key with a four-space indent' \
              || no 'reads an unquoted key with a four-space indent'
 
-GUARD_LOCK="$REGVAR/l2" GUARD_REGISTRY="$REGVAR/unquoted.yaml" \
+GUARD_LOCK_DIR="$REGVAR/l2" GUARD_REGISTRY="$REGVAR/unquoted.yaml" \
   "$ROOT/port-guard.sh" example-web 3000 'example-web' >/dev/null 2>&1
 [ $? -eq 0 ] && ok 'still lets the declared owner through' \
              || no 'still lets the declared owner through'
 
 # An adapter that cannot read its config tree must fail, not report "no consumers found".
-GUARD_LOCK="$REGVAR/l3" GUARD_ADAPTER=nginx NGINX_CONF_DIR="$REGVAR/does-not-exist" \
+GUARD_LOCK_DIR="$REGVAR/l3" GUARD_ADAPTER=nginx NGINX_CONF_DIR="$REGVAR/does-not-exist" \
   GUARD_REGISTRY="$REG" "$ROOT/port-guard.sh" example-web 3000 'example-web' >/dev/null 2>&1
 [ $? -eq 2 ] && ok 'fails when the adapter cannot read its config directory' \
              || no 'fails when the adapter cannot read its config directory'
 rm -rf "$REGVAR"
 
+# A config FILE that exists but cannot be read must fail too, not flatten into an empty
+# consumer set. Root ignores file modes, so drop privileges for this one.
+if command -v setpriv >/dev/null 2>&1 && [ "$(id -u)" = 0 ]; then
+  AF=$(mktemp -d); chmod 755 "$AF"
+  mkdir -p "$AF/conf"; printf 'proxy_pass http://127.0.0.1:3000;\n' > "$AF/conf/site.conf"
+  cp "$ROOT/port-guard.sh" "$AF/pg.sh"; mkdir -p "$AF/adapters"; cp "$ROOT"/adapters/*.sh "$AF/adapters/"
+  chmod -R a+rx "$AF/pg.sh" "$AF/adapters" "$AF/conf"
+  chmod 000 "$AF/conf/site.conf"           # unreadable to the dropped user (set last)
+  mkdir -p "$AF/lockdir"; chown 65534 "$AF/lockdir"
+  OUT=$(setpriv --reuid=65534 --regid=65534 --clear-groups \
+        env GUARD_ADAPTER=nginx NGINX_CONF_DIR="$AF/conf" GUARD_LOCK_DIR="$AF/lockdir" GUARD_REGISTRY="$REG" \
+        "$AF/pg.sh" example-web 3000 'example-web' 2>&1)
+  RC=$?
+  rm -rf "$AF"
+  if [ "$RC" -eq 2 ] && printf '%s' "$OUT" | grep -q 'could not fully read'; then
+    ok 'an unreadable adapter config file fails instead of reading as no-consumers'
+  else
+    no "an unreadable adapter config file fails instead of reading as no-consumers (rc=$RC)"
+  fi
+else
+  ok 'adapter-unreadable-file check skipped (needs root + setpriv)'
+fi
+
 # The registry parser must key off TOP-LEVEL entries only. A nested key with the same name is
 # unrelated metadata; treating it as the registry entry lets the wrong thing decide ownership.
 PARSE=$(mktemp -d)
 printf 'services:\n  3000:\n    app: not-the-registry\n' > "$PARSE/nested.yaml"
-GUARD_LOCK="$PARSE/n1" GUARD_REGISTRY="$PARSE/nested.yaml" \
+GUARD_LOCK_DIR="$PARSE/n1" GUARD_REGISTRY="$PARSE/nested.yaml" \
   "$ROOT/port-guard.sh" anyapp 3000 'anyapp' >/dev/null 2>&1
 [ $? -eq 1 ] && ok 'ignores a nested key that merely looks like a registry entry' \
              || no 'ignores a nested key that merely looks like a registry entry'
 
 # An inline YAML comment is not part of the value.
 printf '\"3000\":\n  app: example-web # the owner\n' > "$PARSE/comment.yaml"
-GUARD_LOCK="$PARSE/n2" GUARD_REGISTRY="$PARSE/comment.yaml" \
+GUARD_LOCK_DIR="$PARSE/n2" GUARD_REGISTRY="$PARSE/comment.yaml" \
   "$ROOT/port-guard.sh" example-web 3000 'example-web' >/dev/null 2>&1
 [ $? -eq 0 ] && ok 'strips an inline comment from the owner value' \
              || no 'strips an inline comment from the owner value'
-GUARD_LOCK="$PARSE/n3" GUARD_REGISTRY="$PARSE/comment.yaml" \
+GUARD_LOCK_DIR="$PARSE/n3" GUARD_REGISTRY="$PARSE/comment.yaml" \
   "$ROOT/port-guard.sh" other-app 3000 'other-app' >/dev/null 2>&1
 [ $? -eq 2 ] && ok 'still rejects a foreign app when the value had a comment' \
              || no 'still rejects a foreign app when the value had a comment'
@@ -147,21 +184,21 @@ rm -rf "$PARSE"
 # so it never matched and ownership enforcement silently switched itself off.
 CRLF=$(mktemp -d)
 printf '"3000":\r\n  app: crlf-owner\r\n' > "$CRLF/reg.yaml"
-GUARD_LOCK="$CRLF/l1" GUARD_REGISTRY="$CRLF/reg.yaml" \
+GUARD_LOCK_DIR="$CRLF/l1" GUARD_REGISTRY="$CRLF/reg.yaml" \
   "$ROOT/port-guard.sh" other-app 3000 'other-app' >/dev/null 2>&1
 [ $? -eq 2 ] && ok 'parses a registry with CRLF line endings' \
              || no 'parses a registry with CRLF line endings'
 
 # A shorter port must not match a longer one, in either direction.
 printf '"300":\n  app: small-app\n' > "$CRLF/prefix.yaml"
-GUARD_LOCK="$CRLF/l2" GUARD_REGISTRY="$CRLF/prefix.yaml" \
+GUARD_LOCK_DIR="$CRLF/l2" GUARD_REGISTRY="$CRLF/prefix.yaml" \
   "$ROOT/port-guard.sh" myapp 3000 'myapp' >/dev/null 2>&1
 [ $? -eq 1 ] && ok 'does not treat port 300 as a match for 3000' \
              || no 'does not treat port 300 as a match for 3000'
 
 # A top-level key with no block must not absorb the next entry's owner.
 printf '"3000":\n"3001":\n  app: next-one\n' > "$CRLF/empty.yaml"
-GUARD_LOCK="$CRLF/l3" GUARD_REGISTRY="$CRLF/empty.yaml" \
+GUARD_LOCK_DIR="$CRLF/l3" GUARD_REGISTRY="$CRLF/empty.yaml" \
   "$ROOT/port-guard.sh" anyapp 3000 'anyapp' >/dev/null 2>&1
 [ $? -eq 1 ] && ok 'an empty registry block does not borrow the next owner' \
              || no 'an empty registry block does not borrow the next owner'
@@ -170,12 +207,12 @@ rm -rf "$CRLF"
 # "No conflict found" and "this port is yours" are different claims. With no registry, no
 # adapter and nothing listening, the guard knows nothing - and must say so rather than approve.
 EVID=$(mktemp -d)
-GUARD_LOCK="$EVID/l1" GUARD_REGISTRY="$EVID/absent.yaml" \
+GUARD_LOCK_DIR="$EVID/l1" GUARD_REGISTRY="$EVID/absent.yaml" \
   "$ROOT/port-guard.sh" myapp 9999 'myapp' >/dev/null 2>&1
 [ $? -eq 1 ] && ok 'reports INCONCLUSIVE when nothing confirms ownership' \
              || no 'reports INCONCLUSIVE when nothing confirms ownership'
 
-OUT=$(GUARD_LOCK="$EVID/l2" GUARD_REGISTRY="$EVID/absent.yaml" \
+OUT=$(GUARD_LOCK_DIR="$EVID/l2" GUARD_REGISTRY="$EVID/absent.yaml" \
       "$ROOT/port-guard.sh" myapp 9999 'myapp' 2>&1)
 printf '%s' "$OUT" | grep -q 'GUARD-INCONCLUSIVE' \
   && ok 'the inconclusive verdict is named, not disguised as success' \
@@ -185,7 +222,7 @@ printf '%s' "$OUT" | grep -q 'is reserved for' \
   || ok 'never claims a reservation it did not establish'
 
 # A registry entry naming this app IS positive evidence.
-GUARD_LOCK="$EVID/l3" GUARD_REGISTRY="$ROOT/examples/port-registry.example.yaml" \
+GUARD_LOCK_DIR="$EVID/l3" GUARD_REGISTRY="$ROOT/examples/port-registry.example.yaml" \
   "$ROOT/port-guard.sh" example-web 3000 'example-web' >/dev/null 2>&1
 [ $? -eq 0 ] && ok 'a matching registry entry confirms ownership' \
              || no 'a matching registry entry confirms ownership'
@@ -215,16 +252,16 @@ rm -rf "$HC"
 VAL=$(mktemp -d)
 printf '"3000":\n  app: example-web\n' > "$VAL/reg.yaml"
 
-GUARD_LOCK="$VAL/l1" GUARD_REGISTRY="$VAL/reg.yaml" \
+GUARD_LOCK_DIR="$VAL/l1" GUARD_REGISTRY="$VAL/reg.yaml" \
   "$ROOT/port-guard.sh" app abc 'app' >/dev/null 2>&1
 [ $? -eq 2 ] && ok 'rejects a non-numeric port' || no 'rejects a non-numeric port'
 
-GUARD_LOCK="$VAL/l2" GUARD_REGISTRY="$VAL/reg.yaml" \
+GUARD_LOCK_DIR="$VAL/l2" GUARD_REGISTRY="$VAL/reg.yaml" \
   "$ROOT/port-guard.sh" app 99999 'app' >/dev/null 2>&1
 [ $? -eq 2 ] && ok 'rejects a port outside 1-65535' || no 'rejects a port outside 1-65535'
 
 # An unparseable regex makes every grep fail, which would read as "no foreign consumers".
-OUT=$(GUARD_LOCK="$VAL/l3" GUARD_REGISTRY="$VAL/reg.yaml" \
+OUT=$(GUARD_LOCK_DIR="$VAL/l3" GUARD_REGISTRY="$VAL/reg.yaml" \
       "$ROOT/port-guard.sh" app 3000 'a[' 2>&1)
 printf '%s' "$OUT" | grep -q 'not a valid extended regex' \
   && ok 'rejects an invalid allowed-owner-regex' || no 'rejects an invalid allowed-owner-regex'
@@ -237,9 +274,9 @@ if command -v setpriv >/dev/null 2>&1 && [ "$(id -u)" = 0 ]; then
   mkdir -p "$VAL/adapters"; cp "$ROOT"/adapters/*.sh "$VAL/adapters/"
   chmod -R a+rx "$VAL/pg.sh" "$VAL/adapters"
   chmod 000 "$VAL/reg.yaml"
-  touch "$VAL/lock"; chmod 666 "$VAL/lock"
+  mkdir -p "$VAL/lockdir"; chown 65534 "$VAL/lockdir"
   OUT=$(setpriv --reuid=65534 --regid=65534 --clear-groups \
-        env GUARD_LOCK="$VAL/lock" GUARD_REGISTRY="$VAL/reg.yaml" \
+        env GUARD_LOCK_DIR="$VAL/lockdir" GUARD_REGISTRY="$VAL/reg.yaml" \
         "$VAL/pg.sh" app 3000 'app' 2>&1)
   printf '%s' "$OUT" | grep -q 'cannot be read' \
     && ok 'an unreadable registry fails instead of reading as empty' \
@@ -256,7 +293,7 @@ rm -rf "$VAL"
 RT=$(mktemp -d); mkdir -p "$RT/bin"
 printf '%s\n' '#!/bin/bash' 'echo "LISTEN 0 511 0.0.0.0:3000 0.0.0.0:*"' > "$RT/bin/ss"
 chmod +x "$RT/bin/ss"
-OUT=$(PATH="$RT/bin:$PATH" GUARD_LOCK="$RT/l1" GUARD_REGISTRY="$REG" \
+OUT=$(PATH="$RT/bin:$PATH" GUARD_LOCK_DIR="$RT/l1" GUARD_REGISTRY="$REG" \
       "$ROOT/port-guard.sh" example-web 3000 'example-web' 2>&1)
 RT_RC=$?
 if [ "$RT_RC" -eq 2 ] && printf '%s' "$OUT" | grep -q 'no owning process could be identified'; then
@@ -269,7 +306,7 @@ fi
 # OK when nothing observed the socket.
 printf '%s\n' '#!/bin/bash' 'exit 1' > "$RT/bin/ss"
 chmod +x "$RT/bin/ss"
-OUT=$(PATH="$RT/bin:$PATH" GUARD_LOCK="$RT/l2" GUARD_REGISTRY="$REG" \
+OUT=$(PATH="$RT/bin:$PATH" GUARD_LOCK_DIR="$RT/l2" GUARD_REGISTRY="$REG" \
       "$ROOT/port-guard.sh" example-web 3000 'example-web' 2>&1)
 RT_RC=$?
 if [ "$RT_RC" -eq 1 ] && printf '%s' "$OUT" | grep -q 'GUARD-INCONCLUSIVE'; then
@@ -287,19 +324,21 @@ printf '%s\n' '#!/bin/bash' 'exit 0' > "$BRD/bin/ss"
 chmod +x "$BRD/bin/ss"
 printf '\"3000\":\n  app: myapp\n' > "$BRD/reg.yaml"
 
-for rx in '.*' '.' '^'; do
-  PATH="$BRD/bin:$PATH" GUARD_LOCK="$BRD/l" GUARD_REGISTRY="$BRD/reg.yaml" \
+# '^/' matched every absolute process cwd but not the old single random probe, so it
+# confirmed any listener as the owner. It must be refused like the other catch-alls.
+for rx in '.*' '.' '^' '^/' '/'; do
+  PATH="$BRD/bin:$PATH" GUARD_LOCK_DIR="$BRD/l" GUARD_REGISTRY="$BRD/reg.yaml" \
     "$ROOT/port-guard.sh" myapp 3000 "$rx" >/dev/null 2>&1
   [ $? -eq 2 ] && ok "refuses the catch-all owner pattern '$rx'" \
                || no "refuses the catch-all owner pattern '$rx'"
 done
 
-PATH="$BRD/bin:$PATH" GUARD_LOCK="$BRD/l2" GUARD_REGISTRY="$BRD/reg.yaml" \
+PATH="$BRD/bin:$PATH" GUARD_LOCK_DIR="$BRD/l2" GUARD_REGISTRY="$BRD/reg.yaml" \
   "$ROOT/port-guard.sh" myapp 3000 'example-web|example-api' >/dev/null 2>&1
 [ $? -eq 0 ] && ok 'a normal alternation pattern still works' \
              || no 'a normal alternation pattern still works'
 
-PATH="$BRD/bin:$PATH" GUARD_ALLOW_BROAD=1 GUARD_LOCK="$BRD/l3" GUARD_REGISTRY="$BRD/reg.yaml" \
+PATH="$BRD/bin:$PATH" GUARD_ALLOW_BROAD=1 GUARD_LOCK_DIR="$BRD/l3" GUARD_REGISTRY="$BRD/reg.yaml" \
   "$ROOT/port-guard.sh" myapp 3000 '.*' >/dev/null 2>&1
 [ $? -eq 0 ] && ok 'GUARD_ALLOW_BROAD is an explicit opt-out' \
              || no 'GUARD_ALLOW_BROAD is an explicit opt-out'
@@ -308,13 +347,13 @@ PATH="$BRD/bin:$PATH" GUARD_ALLOW_BROAD=1 GUARD_LOCK="$BRD/l3" GUARD_REGISTRY="$
 printf '%s\n' '#!/bin/bash' "echo 'LISTEN 0 511 0.0.0.0:3000 0.0.0.0:* users:((\"other\",pid=1,fd=3))'" \
   > "$BRD/bin/ss"
 chmod +x "$BRD/bin/ss"
-PATH="$BRD/bin:$PATH" GUARD_LOCK="$BRD/l4" GUARD_REGISTRY="$BRD/reg.yaml" \
+PATH="$BRD/bin:$PATH" GUARD_LOCK_DIR="$BRD/l4" GUARD_REGISTRY="$BRD/reg.yaml" \
   "$ROOT/port-guard.sh" myapp 3000 'myapp' >/dev/null 2>&1
 [ $? -eq 2 ] && ok 'a foreign process on the port fails with a real pattern' \
              || no 'a foreign process on the port fails with a real pattern'
 
 # A configured ecosystem glob that matches nothing is not "checked and clean".
-PATH="$BRD/bin:$PATH" GUARD_LOCK="$BRD/l5" GUARD_REGISTRY="$BRD/reg.yaml" \
+PATH="$BRD/bin:$PATH" GUARD_LOCK_DIR="$BRD/l5" GUARD_REGISTRY="$BRD/reg.yaml" \
   GUARD_ECOSYSTEM="$BRD/nothing-here/*.js" "$ROOT/port-guard.sh" myapp 3000 'myapp' >/dev/null 2>&1
 [ $? -eq 2 ] && ok 'an ecosystem glob matching nothing fails instead of passing quietly' \
              || no 'an ecosystem glob matching nothing fails instead of passing quietly'

@@ -30,7 +30,10 @@ APPS=$(grep -E '^[A-Za-z0-9._-]+:' "$INV" | sed 's/:.*//')
 FAIL=0
 for app in $APPS; do
   exp_cwd=$(awk -v a="${app}:" '$0==a{f=1;next} f&&/^  cwd:/{print $2;exit} f&&/^[A-Za-z0-9._-]+:/{exit}' "$INV")
-  if [ -z "$exp_cwd" ]; then echo "  SKIP $app (no cwd declared)"; continue; fi
+  # A declared app with no cwd cannot be verified. Skipping it and still exiting 0
+  # made an incomplete inventory look identical to a fully verified one, so treat a
+  # missing cwd as a configuration failure.
+  if [ -z "$exp_cwd" ]; then echo "  FAIL $app has no cwd declared (cannot verify)"; FAIL=1; continue; fi
 
   read -r act_cwd act_st <<<"$(printf '%s' "$J" | python3 -c "
 import sys, json

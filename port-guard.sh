@@ -14,7 +14,9 @@
 # Environment:
 #   GUARD_ADAPTER    openlitespeed | nginx | none   (default: none)
 #   GUARD_REGISTRY   path to port registry YAML     (default: ./port-registry.yaml)
-#   GUARD_LOCK       lock file                      (default: /tmp/deploy-guard.lock)
+#   GUARD_LOCK_DIR   lock directory (flock'd, opened read-only, never truncated)
+#                    (default: /run/lock/deploy-guard as root). Must be a non-symlink
+#                    directory you own.
 #   GUARD_ECOSYSTEM  glob(s) of process-manager configs to scan for static PORT= entries
 #
 # Outcomes:
@@ -48,19 +50,36 @@ fi
 # every foreign proxy consumer is filtered out as "ours", and any process working directory
 # confirms ownership. A genuine owner pattern never matches an unrelated random string.
 if [ "${GUARD_ALLOW_BROAD:-0}" != "1" ]; then
-  _probe=zzq7x-not-an-owner-9f3b1e
-  if printf '%s' "$_probe" | grep -qE "$ALLOW" 2>/dev/null; then
-    echo "GUARD-FAIL: allowed-owner-regex '$ALLOW' matches unrelated strings, so it would"
-    echo "  confirm any process and hide every foreign consumer. Name the app, or set"
-    echo "  GUARD_ALLOW_BROAD=1 if you really mean it."
-    exit 2
-  fi
+  # A legitimate owner pattern identifies ONE app; it must not match unrelated
+  # strings. Probe several structurally different canaries - a random token, two
+  # absolute paths (these catch '^/' and other '/'-anchored patterns that match
+  # every process cwd but not a bare token), and an address - because a single
+  # negative probe cannot establish broadness.
+  for _probe in \
+    'zzq7x-not-an-owner-9f3b1e' \
+    '/zzq7x/not/an/owner/9f3b1e' \
+    '/etc/shadow' \
+    '10.11.12.13:4567' \
+    'unrelated-service-name-xyz'; do
+    if printf '%s' "$_probe" | grep -qE "$ALLOW" 2>/dev/null; then
+      echo "GUARD-FAIL: allowed-owner-regex '$ALLOW' matches unrelated strings (e.g. '$_probe'),"
+      echo "  so it would confirm any process and hide every foreign consumer. Name the app,"
+      echo "  or set GUARD_ALLOW_BROAD=1 if you really mean it."
+      exit 2
+    fi
+  done
 fi
 
 ADAPTER="${GUARD_ADAPTER:-none}"
 REGISTRY="${GUARD_REGISTRY:-./port-registry.yaml}"
-LOCK="${GUARD_LOCK:-/tmp/deploy-guard.lock}"
 ECOSYSTEM="${GUARD_ECOSYSTEM:-}"
+# Lock on a validated, owner-checked directory opened READ-ONLY. A fixed /tmp lock
+# file opened with `>` let a local user pre-plant a symlink and make root truncate
+# an arbitrary file (CWE-59); a directory cannot be truncated.
+MY_UID=$(id -u)
+if [ -n "${GUARD_LOCK_DIR:-}" ]; then LOCK_DIR="$GUARD_LOCK_DIR"
+elif [ "$MY_UID" = "0" ]; then LOCK_DIR=/run/lock/deploy-guard
+else LOCK_DIR="${TMPDIR:-/tmp}/deploy-guard-$MY_UID"; fi
 HERE=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 
 # The adapter name is used to build a path that gets sourced as shell code, so it is matched
@@ -73,8 +92,12 @@ esac
 # shellcheck source=/dev/null
 . "$HERE/adapters/${ADAPTER}.sh" || { echo "GUARD-FAIL: cannot load adapter '$ADAPTER'"; exit 2; }
 
-exec 9>"$LOCK" || { echo "GUARD-FAIL: cannot open lock $LOCK"; exit 3; }
-flock -n 9 || { echo "GUARD-FAIL: another deploy holds the lock ($LOCK)"; exit 3; }
+mkdir -p "$LOCK_DIR" 2>/dev/null
+if [ -L "$LOCK_DIR" ] || [ ! -d "$LOCK_DIR" ] || [ "$(stat -c %u "$LOCK_DIR" 2>/dev/null)" != "$MY_UID" ]; then
+  echo "GUARD-FAIL: unsafe lock dir $LOCK_DIR (must be a non-symlink directory owned by uid $MY_UID)"; exit 3
+fi
+exec 9<"$LOCK_DIR" || { echo "GUARD-FAIL: cannot open lock dir $LOCK_DIR"; exit 3; }
+flock -n 9 || { echo "GUARD-FAIL: another deploy holds the lock ($LOCK_DIR)"; exit 3; }
 
 fail(){ echo "GUARD-FAIL: $*"; exit 2; }
 
@@ -96,11 +119,15 @@ if [ "$ADAPTER" != "none" ]; then
   [ -d "$adapter_dir" ] || fail "adapter '$ADAPTER' cannot read its config directory: $adapter_dir"
   [ -r "$adapter_dir" ] || fail "adapter '$ADAPTER' cannot read its config directory: $adapter_dir"
 fi
-if foreign=$(adapter_consumers "$PORT" 2>/dev/null | grep -viE "$ALLOW" || true); [ -n "${foreign:-}" ]; then
-  fail "port $PORT is consumed by foreign proxy config(s): $(printf '%s' "$foreign" | tr '\n' ' ') (allowed: $ALLOW)"
-fi
 if [ "$ADAPTER" != "none" ]; then
-  mine=$(adapter_consumers "$PORT" 2>/dev/null | grep -iE "$ALLOW" || true)
+  # Enumerate consumers ONCE and check the adapter's exit status. A traversal error
+  # (an unreadable config file, exit >=2) must fail, not be flattened into an empty
+  # consumer set that reads as "no foreign consumers found".
+  consumers=$(adapter_consumers "$PORT"); ac_rc=$?
+  [ "$ac_rc" -ge 2 ] && fail "adapter '$ADAPTER' could not fully read its config tree (exit $ac_rc); refusing to treat that as 'no consumers'"
+  foreign=$(printf '%s\n' "$consumers" | grep -viE "$ALLOW" | grep -v '^[[:space:]]*$' || true)
+  [ -n "${foreign:-}" ] && fail "port $PORT is consumed by foreign proxy config(s): $(printf '%s' "$foreign" | tr '\n' ' ') (allowed: $ALLOW)"
+  mine=$(printf '%s\n' "$consumers" | grep -iE "$ALLOW" || true)
   [ -n "${mine:-}" ] && confirm "proxy config"
 fi
 

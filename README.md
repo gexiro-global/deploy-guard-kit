@@ -83,7 +83,7 @@ Writing one for Caddy or Apache is about five lines — see [`adapters/`](adapte
 |---|---|---|
 | `GUARD_ADAPTER` | port-guard | `none` |
 | `GUARD_REGISTRY` | port-guard | `./port-registry.yaml` |
-| `GUARD_LOCK` | port-guard | `/tmp/deploy-guard.lock` |
+| `GUARD_LOCK_DIR` | port-guard | `/run/lock/deploy-guard` (root) — a non-symlink directory you own; flock'd read-only, never truncated |
 | `GUARD_ECOSYSTEM` | port-guard | unset (glob of process-manager configs to scan; if set, it must match at least one file) |
 | `GUARD_ALLOW_BROAD` | port-guard | `0` — set to `1` to permit an owner pattern that matches everything |
 | `PM2_JLIST_FILE` | pm2-inventory | unset (reads a saved `pm2 jlist` instead of calling pm2) |
