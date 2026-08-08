@@ -51,43 +51,36 @@ fi
 # directory (e.g. '^/[a-z]+/'), which would confirm any listener and hide every
 # foreign consumer. Detecting a "too-broad" regex is undecidable; a fixed-string
 # token simply cannot be broad, so we match literally and drop the regex entirely.
-OWNER_ARGS=()
 OWNER_TOKENS=()
 _oldifs=$IFS; IFS='|'
 for _t in $ALLOW; do
   [ -n "$_t" ] || continue
-  # A token made only of slashes/whitespace (e.g. '/') is a substring of every
-  # absolute working directory, so it would confirm any listener. Require each token
-  # to carry a real identifying character.
-  if [ -z "$(printf '%s' "$_t" | tr -d '[:space:]/')" ]; then
+  # A token with no alphanumeric character (e.g. '/', '.', '-') is not an identity;
+  # matched loosely it would confirm unrelated processes/consumers. Require a real
+  # identifying character.
+  if [ -z "$(printf '%s' "$_t" | tr -cd '[:alnum:]')" ]; then
     IFS=$_oldifs
-    echo "GUARD-FAIL: owner token '$_t' is too generic (matches every path); name the app or a real path fragment"
+    echo "GUARD-FAIL: owner token '$_t' is too generic (no identifying character); name the app or a real path fragment"
     exit 2
   fi
-  OWNER_ARGS+=(-e "$_t")
   OWNER_TOKENS+=("$_t")
 done
 IFS=$_oldifs
-[ "${#OWNER_ARGS[@]}" -gt 0 ] || { echo "GUARD-FAIL: no owner token given in '$ALLOW'"; exit 2; }
-owner_match(){ grep -iF "${OWNER_ARGS[@]}"; }    # keep lines containing any owner token
-owner_reject(){ grep -ivF "${OWNER_ARGS[@]}"; }  # keep lines containing no owner token
+[ "${#OWNER_TOKENS[@]}" -gt 0 ] || { echo "GUARD-FAIL: no owner token given in '$ALLOW'"; exit 2; }
 
-# Ownership of a LISTENER's working directory is matched at PATH-COMPONENT boundaries,
-# not as a loose substring: owner token 'foreign' matches cwd '/srv/foreign/app' but
-# NOT '/srv/foreignstuff'. This stops a token from confirming an unrelated process
-# whose path merely contains the token as a substring. Case-insensitive.
-cwd_owned(){
-  local cwd padded t
-  cwd=$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]')
-  padded="/${cwd#/}/"
+# Ownership is matched at COMPONENT boundaries, not as a loose substring: separators
+# (/ . - _) are normalised to boundaries, so owner token 'foreign' matches a cwd or
+# consumer 'srv/foreign/app' or 'foreign.conf' but NOT 'foreignstuff'. This stops a
+# token from confirming an unrelated process or vhost whose name merely contains the
+# token as a substring. Case-insensitive. Used for cwds, proxy consumers and configs.
+str_owned(){
+  local s padded t
+  s=$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]' | tr './-_' '////')
+  padded="/${s#/}/"
   for t in "${OWNER_TOKENS[@]}"; do
-    t=$(printf '%s' "$t" | tr '[:upper:]' '[:lower:]')
-    case "$t" in
-      */*)  # a path-fragment token: match as a bounded path substring
-        case "$padded" in *"/${t#/}/"*|*"/${t#/}"*|*"${t%/}/"*) return 0 ;; esac ;;
-      *)    # a name token: must be a whole path component
-        case "$padded" in *"/$t/"*) return 0 ;; esac ;;
-    esac
+    t=$(printf '%s' "$t" | tr '[:upper:]' '[:lower:]' | tr './-_' '////')
+    t="/${t#/}"; t="${t%/}"          # normalise to a leading-slash, no-trailing-slash fragment
+    case "$padded" in *"${t}/"*) return 0 ;; esac
   done
   return 1
 }
@@ -164,10 +157,14 @@ if [ "$ADAPTER" != "none" ]; then
   # consumer set that reads as "no foreign consumers found".
   consumers=$(adapter_consumers "$PORT"); ac_rc=$?
   [ "$ac_rc" -ge 2 ] && fail "adapter '$ADAPTER' could not fully read its config tree (exit $ac_rc); refusing to treat that as 'no consumers'"
-  foreign=$(printf '%s\n' "$consumers" | owner_reject | grep -v '^[[:space:]]*$' || true)
-  [ -n "${foreign:-}" ] && fail "port $PORT is consumed by foreign proxy config(s): $(printf '%s' "$foreign" | tr '\n' ' ') (allowed: $ALLOW)"
-  mine=$(printf '%s\n' "$consumers" | owner_match || true)
-  [ -n "${mine:-}" ] && confirm "proxy config"
+  # Classify each consumer by boundary-aware ownership, not a loose substring.
+  foreign=""; mine=""
+  while IFS= read -r _cons; do
+    [ -n "$_cons" ] || continue
+    if str_owned "$_cons"; then mine="yes"; else foreign="${foreign}${foreign:+ }$_cons"; fi
+  done <<< "$consumers"
+  [ -n "$foreign" ] && fail "port $PORT is consumed by foreign proxy config(s): $foreign (allowed: $ALLOW)"
+  [ -n "$mine" ] && confirm "proxy config"
 fi
 
 # 2) STATIC - process manager: is the port hardcoded in someone else's config?
@@ -186,8 +183,13 @@ if [ -n "$ECOSYSTEM" ]; then
     fail "GUARD_ECOSYSTEM was set but matched no files: $ECOSYSTEM"
   fi
   # shellcheck disable=SC2086
-  bad_eco=$(grep -rlE "PORT[^0-9]{0,10}${PORT}([^0-9]|$)" $ECOSYSTEM 2>/dev/null | owner_reject || true)
-  [ -n "$bad_eco" ] && fail "port $PORT is statically reserved in another app's config: $(printf '%s' "$bad_eco" | tr '\n' ' ')"
+  _eco_hits=$(grep -rlE "PORT[^0-9]{0,10}${PORT}([^0-9]|$)" $ECOSYSTEM 2>/dev/null || true)
+  bad_eco=""
+  while IFS= read -r _f; do
+    [ -n "$_f" ] || continue
+    str_owned "$_f" || bad_eco="${bad_eco}${bad_eco:+ }$_f"
+  done <<< "$_eco_hits"
+  [ -n "$bad_eco" ] && fail "port $PORT is statically reserved in another app's config: $bad_eco"
 fi
 
 # 3) REGISTRY - declared owner must be this app, UNKNOWN, or absent
@@ -261,7 +263,7 @@ else
         if [ -z "$lcwd" ]; then
           fail "port $PORT is bound by PID $lpid whose working directory cannot be read"
         fi
-        cwd_owned "$lcwd" \
+        str_owned "$lcwd" \
           || fail "port $PORT is bound by PID $lpid (cwd=$lcwd), which matches no owner token in '$ALLOW' at a path boundary"
       done
       confirm "running process"

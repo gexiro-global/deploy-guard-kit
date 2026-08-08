@@ -16,9 +16,10 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   and confirm any listener; detecting a "too-broad" regex is undecidable, so ownership
   is matched literally and cannot be broad. Alternation via `|` still works
   (`example-web|example-api`); `GUARD_ALLOW_BROAD` is removed (no longer needed). A
-  listener's working directory is matched at **path-component boundaries** (owner
-  `foreign` matches `/srv/foreign/app` but not `/srv/foreignstuff`), and a slash-only
-  token is rejected as too generic.
+  listener's working directory, proxy consumers and process-manager configs are all
+  matched at **component boundaries** (separators `/ . - _` are boundaries; owner
+  `foreign` matches `foreign/app` or `foreign.conf` but not `foreignstuff`), and a
+  token with no alphanumeric character (e.g. `.` or `/`) is rejected as too generic.
 
 ### Fixed
 - A reverse-proxy adapter that hits an unreadable config file OR an inaccessible

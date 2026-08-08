@@ -412,6 +412,29 @@ kill "$SUBPID2" 2>/dev/null; rm -rf "$CT"
 [ "$RC" -eq 0 ] && ok 'a cwd with the token as a whole path component confirms ownership' \
                || no "a cwd path-component match confirms ownership (rc=$RC)"
 
+# Proxy consumers are classified at boundaries too (the same looseness that let '.'
+# match 'foreign.conf' is closed): a foreign vhost is flagged, a generic token is
+# refused, and a real component match confirms.
+PC=$(mktemp -d); mkdir -p "$PC/conf"
+printf 'server { proxy_pass http://127.0.0.1:3000; }\n' > "$PC/conf/otherapp.conf"
+GUARD_ADAPTER=nginx NGINX_CONF_DIR="$PC/conf" GUARD_LOCK_DIR="$PC/lk" GUARD_REGISTRY="$PC/absent.yaml" \
+  "$ROOT/port-guard.sh" myapp 3000 'myapp' >/dev/null 2>&1
+[ $? -eq 2 ] && ok 'a foreign proxy consumer is flagged (boundary match)' \
+             || no 'a foreign proxy consumer is flagged (boundary match)'
+OUT=$(GUARD_ADAPTER=nginx NGINX_CONF_DIR="$PC/conf" GUARD_LOCK_DIR="$PC/lk2" GUARD_REGISTRY="$PC/absent.yaml" \
+      "$ROOT/port-guard.sh" myapp 3000 '.' 2>&1)
+RC=$?
+if [ "$RC" -eq 2 ] && printf '%s' "$OUT" | grep -q 'too generic'; then
+  ok "a generic token '.' is refused before any consumer match"
+else
+  no "a generic token '.' is refused (rc=$RC)"
+fi
+GUARD_ADAPTER=nginx NGINX_CONF_DIR="$PC/conf" GUARD_LOCK_DIR="$PC/lk3" GUARD_REGISTRY="$PC/absent.yaml" \
+  "$ROOT/port-guard.sh" myapp 3000 'otherapp' >/dev/null 2>&1
+[ $? -eq 0 ] && ok 'a proxy consumer matching an owner token at a boundary confirms ownership' \
+             || no 'a proxy consumer matching an owner token at a boundary confirms ownership'
+rm -rf "$PC"
+
 # A token that is only slashes/space is a substring of every absolute cwd; it must be
 # refused outright rather than confirm any listener.
 for own in '/' '//' ' / '; do
