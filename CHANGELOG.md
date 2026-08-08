@@ -9,11 +9,12 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   read-only, replacing a predictable `/tmp` lock file opened with `>` that a local
   user could redirect at an arbitrary root-writable file (CWE-59). Lock env var is now
   `GUARD_LOCK_DIR`.
-- The over-broad owner-pattern guard now probes a complete set of canaries - `/`
-  followed by every possible first character plus a random tail - so `^/` and every
-  `^/[class]`-style pattern (which match arbitrary process cwds) are refused, while
-  a specific owner name or path is not. `GUARD_ALLOW_BROAD=1` remains the explicit
-  opt-out.
+- **Breaking:** the `<allowed-owner>` argument is now a `|`-separated list of LITERAL
+  owner tokens matched as fixed strings, not a regex. An arbitrary regex used as an
+  ownership identity could be crafted to match every process cwd (e.g. `^/[a-z]+/`)
+  and confirm any listener; detecting a "too-broad" regex is undecidable, so ownership
+  is matched literally and cannot be broad. Alternation via `|` still works
+  (`example-web|example-api`); `GUARD_ALLOW_BROAD` is removed (no longer needed).
 
 ### Fixed
 - A reverse-proxy adapter that hits an unreadable config file OR an inaccessible

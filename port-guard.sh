@@ -9,7 +9,11 @@
 # static reservations (reverse-proxy configs, process-manager configs, a declared
 # registry) as well as the live socket, and it holds a lock so two deploys cannot race.
 #
-# Usage: port-guard.sh <app-name> <port> <allowed-owner-regex>
+# Usage: port-guard.sh <app-name> <port> <allowed-owner>
+#
+# <allowed-owner> is a '|'-separated list of LITERAL owner tokens (app names or path
+# fragments), matched case-insensitively as fixed strings - not a regex. Example:
+# 'example-web' or 'example-web|/srv/example-web'.
 #
 # Environment:
 #   GUARD_ADAPTER    openlitespeed | nginx | none   (default: none)
@@ -30,9 +34,9 @@
 # Exit: 0 confirmed | 1 inconclusive | 2 collision | 3 another deploy holds the lock
 set -uo pipefail
 
-APP="${1:?usage: port-guard.sh <app-name> <port> <allowed-owner-regex>}"
+APP="${1:?usage: port-guard.sh <app-name> <port> <allowed-owner>}"
 PORT="${2:?missing port}"
-ALLOW="${3:?missing allowed-owner-regex}"
+ALLOW="${3:?missing allowed-owner (a '|'-separated list of literal owner tokens)}"
 
 case "$PORT" in
   ''|*[!0-9]*) echo "GUARD-FAIL: port must be a number, got '$PORT'"; exit 2 ;;
@@ -40,43 +44,20 @@ esac
 if [ "$PORT" -lt 1 ] || [ "$PORT" -gt 65535 ]; then
   echo "GUARD-FAIL: port out of range: $PORT"; exit 2
 fi
-# ALLOW is used as an extended regex. grep exits 2 on an invalid pattern; without this check an
-# unparseable regex would make every match fail, which reads as "no foreign consumers found".
-if echo x | grep -qE "$ALLOW" 2>/dev/null; then :; elif [ $? -gt 1 ]; then
-  echo "GUARD-FAIL: allowed-owner-regex is not a valid extended regex: $ALLOW"; exit 2
-fi
-
-# A pattern that matches everything - '.*', '.', '^' - turns the guard off without saying so:
-# every foreign proxy consumer is filtered out as "ours", and any process working directory
-# confirms ownership. A genuine owner pattern never matches an unrelated random string.
-if [ "${GUARD_ALLOW_BROAD:-0}" != "1" ]; then
-  # A legitimate owner pattern identifies ONE app; it must not match unrelated
-  # strings. A FIXED probe set is always defeatable by a pattern crafted around it
-  # (e.g. '^/[^ez]' dodges fixed canaries yet matches every real process cwd), so
-  # generate RANDOM canaries each run - as bare tokens and as absolute paths - and
-  # refuse any pattern that matches one. A pattern broad enough to match arbitrary
-  # absolute paths/tokens is caught with overwhelming probability; a specific owner
-  # name/path matches none of them.
-  _rand(){ head -c 24 /dev/urandom 2>/dev/null | LC_ALL=C tr -dc 'A-Za-z0-9' | cut -c1-16; }
-  _broad=0
-  # Build a canary for '/' followed by EVERY possible first character, each with a
-  # random tail: '/a<rand>', '/b<rand>', ... '/9<rand>'. Any '^/[class]' pattern (or
-  # '^/', '.', '.*', '^') matches at least one of these, so it is refused; but a
-  # specific owner - a name or a real path like 'app' or '/srv/app' - matches none of
-  # them (each canary is a single letter plus 16 random chars, not a real word).
-  for _c in a b c d e f g h i j k l m n o p q r s t u v w x y z 0 1 2 3 4 5 6 7 8 9; do
-    _r=$(_rand); [ -n "$_r" ] || _r="fb${RANDOM}${RANDOM}"
-    for _probe in "$_r" "/${_c}${_r}"; do
-      if printf '%s' "$_probe" | grep -qE "$ALLOW" 2>/dev/null; then _broad=1; break 2; fi
-    done
-  done
-  if [ "$_broad" = "1" ]; then
-    echo "GUARD-FAIL: allowed-owner-regex '$ALLOW' matches unrelated random strings, so it"
-    echo "  would confirm any process and hide every foreign consumer. Name the app/path,"
-    echo "  or set GUARD_ALLOW_BROAD=1 if you really mean it."
-    exit 2
-  fi
-fi
+# The allowed-owner is a '|'-separated list of LITERAL tokens (app names or path
+# fragments), matched case-insensitively as FIXED strings - never as a regex. This
+# is deliberate and is the ownership model's security foundation: an arbitrary regex
+# used as an ownership identity can be crafted to match every process working
+# directory (e.g. '^/[a-z]+/'), which would confirm any listener and hide every
+# foreign consumer. Detecting a "too-broad" regex is undecidable; a fixed-string
+# token simply cannot be broad, so we match literally and drop the regex entirely.
+OWNER_ARGS=()
+_oldifs=$IFS; IFS='|'
+for _t in $ALLOW; do [ -n "$_t" ] && OWNER_ARGS+=(-e "$_t"); done
+IFS=$_oldifs
+[ "${#OWNER_ARGS[@]}" -gt 0 ] || { echo "GUARD-FAIL: no owner token given in '$ALLOW'"; exit 2; }
+owner_match(){ grep -iF "${OWNER_ARGS[@]}"; }    # keep lines containing any owner token
+owner_reject(){ grep -ivF "${OWNER_ARGS[@]}"; }  # keep lines containing no owner token
 
 ADAPTER="${GUARD_ADAPTER:-none}"
 REGISTRY="${GUARD_REGISTRY:-./port-registry.yaml}"
@@ -133,9 +114,9 @@ if [ "$ADAPTER" != "none" ]; then
   # consumer set that reads as "no foreign consumers found".
   consumers=$(adapter_consumers "$PORT"); ac_rc=$?
   [ "$ac_rc" -ge 2 ] && fail "adapter '$ADAPTER' could not fully read its config tree (exit $ac_rc); refusing to treat that as 'no consumers'"
-  foreign=$(printf '%s\n' "$consumers" | grep -viE "$ALLOW" | grep -v '^[[:space:]]*$' || true)
+  foreign=$(printf '%s\n' "$consumers" | owner_reject | grep -v '^[[:space:]]*$' || true)
   [ -n "${foreign:-}" ] && fail "port $PORT is consumed by foreign proxy config(s): $(printf '%s' "$foreign" | tr '\n' ' ') (allowed: $ALLOW)"
-  mine=$(printf '%s\n' "$consumers" | grep -iE "$ALLOW" || true)
+  mine=$(printf '%s\n' "$consumers" | owner_match || true)
   [ -n "${mine:-}" ] && confirm "proxy config"
 fi
 
@@ -155,7 +136,7 @@ if [ -n "$ECOSYSTEM" ]; then
     fail "GUARD_ECOSYSTEM was set but matched no files: $ECOSYSTEM"
   fi
   # shellcheck disable=SC2086
-  bad_eco=$(grep -rlE "PORT[^0-9]{0,10}${PORT}([^0-9]|$)" $ECOSYSTEM 2>/dev/null | grep -viE "$ALLOW" || true)
+  bad_eco=$(grep -rlE "PORT[^0-9]{0,10}${PORT}([^0-9]|$)" $ECOSYSTEM 2>/dev/null | owner_reject || true)
   [ -n "$bad_eco" ] && fail "port $PORT is statically reserved in another app's config: $(printf '%s' "$bad_eco" | tr '\n' ' ')"
 fi
 
@@ -230,8 +211,8 @@ else
         if [ -z "$lcwd" ]; then
           fail "port $PORT is bound by PID $lpid whose working directory cannot be read"
         fi
-        echo "$lcwd" | grep -qiE "$ALLOW" \
-          || fail "port $PORT is bound by PID $lpid (cwd=$lcwd), which does not match /$ALLOW/"
+        printf '%s' "$lcwd" | owner_match >/dev/null \
+          || fail "port $PORT is bound by PID $lpid (cwd=$lcwd), which matches no owner token in '$ALLOW'"
       done
       confirm "running process"
     fi

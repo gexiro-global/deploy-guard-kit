@@ -282,11 +282,12 @@ GUARD_LOCK_DIR="$VAL/l2" GUARD_REGISTRY="$VAL/reg.yaml" \
   "$ROOT/port-guard.sh" app 99999 'app' >/dev/null 2>&1
 [ $? -eq 2 ] && ok 'rejects a port outside 1-65535' || no 'rejects a port outside 1-65535'
 
-# An unparseable regex makes every grep fail, which would read as "no foreign consumers".
-OUT=$(GUARD_LOCK_DIR="$VAL/l3" GUARD_REGISTRY="$VAL/reg.yaml" \
-      "$ROOT/port-guard.sh" app 3000 'a[' 2>&1)
-printf '%s' "$OUT" | grep -q 'not a valid extended regex' \
-  && ok 'rejects an invalid allowed-owner-regex' || no 'rejects an invalid allowed-owner-regex'
+# Owner tokens are literal: regex metacharacters are not special and must not error
+# (a bare 'a[' would abort an -E grep). The declared owner still confirms via registry.
+GUARD_LOCK_DIR="$VAL/l3" GUARD_REGISTRY="$VAL/reg.yaml" \
+  "$ROOT/port-guard.sh" example-web 3000 'a[' >/dev/null 2>&1
+[ $? -eq 0 ] && ok 'a literal owner token with regex metacharacters is accepted, not parsed as a regex' \
+             || no 'a literal owner token with regex metacharacters is accepted, not parsed as a regex'
 
 # A configured registry that cannot be read must not be treated as "no entry". Root ignores file
 # modes, so this one only means anything when run unprivileged.
@@ -346,35 +347,25 @@ printf '%s\n' '#!/bin/bash' 'exit 0' > "$BRD/bin/ss"
 chmod +x "$BRD/bin/ss"
 printf '\"3000\":\n  app: myapp\n' > "$BRD/reg.yaml"
 
-# '^/' matched every absolute process cwd but not the old single random probe, so it
-# confirmed any listener as the owner. Crafted variants ('^/[^ez]', '^/[a-z]', '^/w')
-# dodge a FIXED probe set but still match real cwds; the randomized/rooted canaries
-# must refuse them too.
-for rx in '.*' '.' '^' '^/' '/' '^/[^ez]' '^/[a-z]' '^/w'; do
-  PATH="$BRD/bin:$PATH" GUARD_LOCK_DIR="$BRD/l" GUARD_REGISTRY="$BRD/reg.yaml" \
-    "$ROOT/port-guard.sh" myapp 3000 "$rx" >/dev/null 2>&1
-  [ $? -eq 2 ] && ok "refuses the catch-all owner pattern '$rx'" \
-               || no "refuses the catch-all owner pattern '$rx'"
-done
-
+# Owner tokens are LITERAL, so a specific owner and an alternation both work; a
+# "broad-looking" value is just a fixed string.
 PATH="$BRD/bin:$PATH" GUARD_LOCK_DIR="$BRD/l2" GUARD_REGISTRY="$BRD/reg.yaml" \
   "$ROOT/port-guard.sh" myapp 3000 'example-web|example-api' >/dev/null 2>&1
-[ $? -eq 0 ] && ok 'a normal alternation pattern still works' \
-             || no 'a normal alternation pattern still works'
+[ $? -eq 0 ] && ok 'a normal alternation of owner tokens still works' \
+             || no 'a normal alternation of owner tokens still works'
 
-PATH="$BRD/bin:$PATH" GUARD_ALLOW_BROAD=1 GUARD_LOCK_DIR="$BRD/l3" GUARD_REGISTRY="$BRD/reg.yaml" \
-  "$ROOT/port-guard.sh" myapp 3000 '.*' >/dev/null 2>&1
-[ $? -eq 0 ] && ok 'GUARD_ALLOW_BROAD is an explicit opt-out' \
-             || no 'GUARD_ALLOW_BROAD is an explicit opt-out'
-
-# A foreign process must fail with a real pattern - the case '.*' was hiding.
+# THE bypass class, permanently closed: a foreign process on the port must FAIL even
+# when the owner token is one of the regexes that previously matched every cwd. As a
+# literal fixed string, '^/[a-z]+/' appears in no real cwd, so it cannot confirm it.
 printf '%s\n' '#!/bin/bash' "echo 'LISTEN 0 511 0.0.0.0:3000 0.0.0.0:* users:((\"other\",pid=1,fd=3))'" \
   > "$BRD/bin/ss"
 chmod +x "$BRD/bin/ss"
-PATH="$BRD/bin:$PATH" GUARD_LOCK_DIR="$BRD/l4" GUARD_REGISTRY="$BRD/reg.yaml" \
-  "$ROOT/port-guard.sh" myapp 3000 'myapp' >/dev/null 2>&1
-[ $? -eq 2 ] && ok 'a foreign process on the port fails with a real pattern' \
-             || no 'a foreign process on the port fails with a real pattern'
+for own in 'myapp' '.*' '.' '^' '^/' '^/[a-z]+/' '^/[^ez]'; do
+  PATH="$BRD/bin:$PATH" GUARD_LOCK_DIR="$BRD/l4" GUARD_REGISTRY="$BRD/reg.yaml" \
+    "$ROOT/port-guard.sh" myapp 3000 "$own" >/dev/null 2>&1
+  [ $? -eq 2 ] && ok "a foreign process fails even with owner token '$own' (literal, cannot be broad)" \
+               || no "a foreign process fails even with owner token '$own' (literal must not confirm)"
+done
 
 # A configured ecosystem glob that matches nothing is not "checked and clean".
 PATH="$BRD/bin:$PATH" GUARD_LOCK_DIR="$BRD/l5" GUARD_REGISTRY="$BRD/reg.yaml" \

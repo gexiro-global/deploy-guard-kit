@@ -102,7 +102,7 @@ are different claims:
 | `GUARD-FAIL` | `2` | Something else owns or consumes it. |
 | — | `3` | Another deploy holds the lock. |
 
-The `allowed-owner-regex` argument is refused if it matches unrelated strings - `.*`, `.`, `^`.
+The `allowed-owner` argument is a `|`-separated list of **literal** owner tokens (app names or path fragments), matched case-insensitively as fixed strings — not a regex. This is deliberate: an arbitrary owner regex could be crafted to match every process working directory (e.g. `^/[a-z]+/`) and thereby confirm any listener, so ownership is matched literally and cannot be made "broad".
 Such a pattern filters every foreign proxy consumer out as "ours" and lets any process
 working directory confirm ownership, which turns the guard off without saying so. Name the
 app, or set `GUARD_ALLOW_BROAD=1` deliberately.
