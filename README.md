@@ -1,10 +1,10 @@
 # deploy-guard-kit
 
 [![CI](https://github.com/gexiro-global/deploy-guard-kit/actions/workflows/ci.yml/badge.svg)](https://github.com/gexiro-global/deploy-guard-kit/actions/workflows/ci.yml)
-[![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
+[![License: Apache-2.0](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
 
-Three pre-flight checks for single-host deploys, aimed at the failures that green status
-indicators do not catch.
+Three pre-flight checks for single-host deploys, aimed at reserved-port conflicts and other
+failures that green status indicators do not catch.
 
 Each one exists because of a specific outage shape:
 
@@ -97,7 +97,7 @@ are different claims:
 
 | Verdict | Exit | Meaning |
 |---|---|---|
-| `GUARD-OK` | `0` | At least one source positively confirms the port belongs to this app - a registry entry, a proxy consumer, or a running process with a matching working directory. |
+| `GUARD-OK` | `0` | At least one source positively confirms the port belongs to this app — a registry entry, a proxy consumer, or a running process with a matching working directory. |
 | `GUARD-INCONCLUSIVE` | `1` | Nothing else claims the port, but nothing confirms it is yours either. Declare it somewhere, then re-run. |
 | `GUARD-FAIL` | `2` | Something else owns or consumes it. |
 | — | `3` | Another deploy holds the lock. |
@@ -135,11 +135,13 @@ as "no conflict found in the places I know how to look", not as proof of exclusi
 ```
 
 Fully offline: no network, no PM2, no firewall, no privileged access. The PM2 check runs against
-JSON fixtures; the healthcheck runs against a stubbed `curl`; the registry parser is exercised with
+JSON fixtures; the health check runs against a stubbed `curl`; the registry parser is exercised with
 the YAML variations people actually write.
 
 ## License
 
 Apache-2.0. See [LICENSE](LICENSE).
 
-Built and maintained by Gexiro Global Enterprises Ltd.
+Built and maintained by [Gexiro Global Enterprises Ltd](https://gexiro.com).
+
+Part of the [Gexiro open-source toolkit](https://github.com/gexiro-global).
