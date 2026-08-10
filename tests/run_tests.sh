@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/usr/bin/env bash
 # Offline test suite. No network, no pm2, no firewall, no privileged access.
 # shellcheck disable=SC2015,SC2016,SC2181
 # SC2015: the `[ cond ] && ok "..." || no "..."` shape is intentional here - `ok` cannot fail,
@@ -458,7 +458,6 @@ rm -rf "$BRD"
 echo
 echo "passed=$PASS failed=$FAIL"
 [ "$FAIL" -eq 0 ]
-
 
 
 
